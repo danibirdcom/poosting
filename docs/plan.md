@@ -33,18 +33,30 @@ Lectura obligatoria al inicio de cada sesión grande de trabajo.
 
 **Objetivo:** detectar tendencias y mostrarlas en UI.
 
-**Entregables:**
-- Workers de scraping para Google Trends, X (tier básico), GDELT, RSS de
-  fuentes de cada medio.
-- Tabla `senales` poblada con cron BullMQ (cada 15 min).
-- Scoring compuesto (`scoring_pesos`) configurable por medio y categoría.
-- Vista de bandeja de señales en el dashboard con filtros y "lanzar artículo".
+**Entregables backend (PR Fase 2a — esta tanda):**
+- [x] Migración 003: `perfiles_deteccion`, `fuentes_configuradas`, `presupuestos_api`, extender `senales`.
+- [x] Detector RSS (parser propio RSS 2.0 + Atom).
+- [x] Detector Google Trends con mezcla de geos pesados.
+- [x] Detector GDELT.
+- [x] Detector X API funcional con budget hard-cap (95% del mensual).
+- [x] Scorer puro y reproducible (tests).
+- [x] Dedupe semántico cosine > 0.85 (no clustering — ver `docs/agents/trend_detector.md`).
+- [x] Abstracción `JobScheduler` con implementación `GithubActionsScheduler`.
+- [x] Cron `*/15` en `.github/workflows/detect-signals.yml` con matrix por medio.
+- [x] CLI `python -m src.cli detect --medio-slug ...`.
+- [x] Script `scripts/seed_hoy_aragon.py` para onboarding del medio piloto.
+- [x] Tests: scorer puro, RSS parser, RLS tablas nuevas, budget enforcement, GTrends, GDELT, X API.
+
+**Entregables UI (PR Fase 2b — siguiente):**
+- [ ] Endpoint `GET /senales` con filtros (categoría, paywall, score min, origen).
+- [ ] Bandeja editorial de señales en Next.js (top 50, refresh cada 60s).
+- [ ] Modal "asignar redactor + lanzar pipeline" (stub, hace `runs` insert).
 
 **Criterios de aceptación:**
-- Cada origen escribe al menos 50 señales/día en dev.
-- Score reproducible: misma señal mismos parámetros → mismo score.
-- Dashboard muestra top 50 ordenadas por score con metadata.
-- Click en señal → modal con "asignar a redactor X y lanzar pipeline".
+- Cada origen escribe al menos 50 señales/día en dev (medible tras ~3 días de cron).
+- Score reproducible: misma señal mismos parámetros → mismo score. ✅ Tests en `test_scorer.py`.
+- Dashboard muestra top 50 ordenadas por score con metadata. (PR 2b)
+- Click en señal → modal con "asignar a redactor X y lanzar pipeline". (PR 2b)
 
 ## Fase 3 — Pipeline multiagente básico (semana 4-5)
 

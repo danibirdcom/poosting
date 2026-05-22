@@ -1,0 +1,110 @@
+name: Detect signals
+
+# Cron cada 15 min + dispatch manual. Mientras dure Fase 2-2.5, este job
+# sustituye a los workers daemon. Cuando provisione EC2/Coolify y montemos
+# BullMQ, este workflow se desactiva (cron) y queda sólo `workflow_dispatch`
+# como botón de pánico.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      medio_slug:
+        description: "Slug del medio (vacío = todos los activos)"
+        required: false
+        default: ""
+      detector:
+        description: "Filtrar a un detector: rss|gtrends|gdelt|x (vacío = todos)"
+        required: false
+        default: ""
+
+concurrency:
+  group: detect-signals
+  cancel-in-progress: false   # no perdamos un ciclo en curso por arrancar otro
+
+jobs:
+  detect:
+    name: Detección de tendencias
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # Matrix sobre los medios activos. Como GH Actions no permite generar la
+    # matrix desde la BD sin un job previo, fijamos la lista aquí. Cuando
+    # añadamos un medio nuevo, editar este array. Trade-off consciente: simple
+    # vs dinámico. Coste de mantenimiento bajo (3 medios iniciales).
+    strategy:
+      fail-fast: false
+      matrix:
+        medio: [hoy-aragon, sports-aragon, diario-de-huesca]
+
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      RDS_SG_ID: ${{ secrets.RDS_SG_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Abrir SG
+        id: open_sg
+        run: |
+          set -euo pipefail
+          RUNNER_IP=$(curl -fsS https://checkip.amazonaws.com | tr -d '\n')
+          echo "runner_ip=${RUNNER_IP}" >> "$GITHUB_OUTPUT"
+          aws ec2 authorize-security-group-ingress \
+            --group-id "$RDS_SG_ID" \
+            --ip-permissions "IpProtocol=tcp,FromPort=5432,ToPort=5432,IpRanges=[{CidrIp=${RUNNER_IP}/32,Description=detect-${{ github.run_id }}}]" \
+            || true
+
+      - name: Instalar deps de workers
+        working-directory: workers
+        run: uv sync
+
+      - name: Ejecutar detector
+        working-directory: workers
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_DEV }}
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+          X_API_BEARER: ${{ secrets.X_API_BEARER }}
+          LOG_LEVEL: INFO
+        run: |
+          set -euo pipefail
+          # workflow_dispatch puede filtrar a un medio concreto; cron procesa todos.
+          DISPATCH_MEDIO="${{ github.event.inputs.medio_slug }}"
+          if [ -n "$DISPATCH_MEDIO" ] && [ "$DISPATCH_MEDIO" != "${{ matrix.medio }}" ]; then
+            echo "Skipping ${{ matrix.medio }} (dispatch filtró a $DISPATCH_MEDIO)"
+            exit 0
+          fi
+          DET_ARG=""
+          if [ -n "${{ github.event.inputs.detector }}" ]; then
+            DET_ARG="--detector ${{ github.event.inputs.detector }}"
+          fi
+          uv run python -m src.cli detect --medio-slug ${{ matrix.medio }} $DET_ARG
+
+      - name: Revocar SG
+        if: always()
+        run: |
+          set +e
+          RUNNER_IP="${{ steps.open_sg.outputs.runner_ip }}"
+          if [ -z "$RUNNER_IP" ]; then exit 0; fi
+          aws ec2 revoke-security-group-ingress \
+            --group-id "$RDS_SG_ID" \
+            --ip-permissions "IpProtocol=tcp,FromPort=5432,ToPort=5432,IpRanges=[{CidrIp=${RUNNER_IP}/32}]" || true
+          exit 0

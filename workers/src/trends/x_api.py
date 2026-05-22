@@ -1,0 +1,154 @@
+"""Detector X (Twitter) API v2.
+
+Implementación funcional con budget enforcement HARD-CAP. Si no hay bearer
+token configurado, hace skip silencioso (warning log, no crash) — el código
+está completo para activar cuando ``X_API_BEARER`` esté disponible.
+
+Coste estimado por read: ``X_READ_COST_EUR`` (0.0046 €). Antes de cada
+llamada reservamos contra ``presupuestos_api``. Si la reserva falla,
+abortamos limpiamente.
+
+Solo recommended para medios con `presupuestos_api(servicio='x_api')` activo
+(en Fase 2: solo Hoy Aragón).
+"""
+
+from __future__ import annotations
+
+import os
+from decimal import Decimal
+from typing import Any
+
+import asyncpg
+import httpx
+import structlog
+
+from .base import DetectorContext, SenalCruda
+from .budget import BudgetExceeded, liberar, reservar
+
+logger = structlog.get_logger(__name__)
+
+BASE_URL = "https://api.x.com/2/tweets/search/recent"
+TIMEOUT_S = 20.0
+X_READ_COST_EUR = Decimal("0.0046")
+SERVICIO = "x_api"
+
+
+class XApiDetector:
+    """Necesita una conexión a BD para reservar budget — el detector base es
+    "pure", pero éste es la excepción documentada porque el contrato del
+    budget es atómico.
+
+    Se pasa el ``conn`` en el constructor para mantener la firma del Protocol
+    en ``detectar``.
+    """
+
+    nombre = "x"
+
+    def __init__(self, conn: asyncpg.Connection, bearer_token: str | None = None) -> None:
+        self._conn = conn
+        self._bearer = bearer_token or os.environ.get("X_API_BEARER", "")
+
+    async def detectar(self, ctx: DetectorContext) -> list[SenalCruda]:
+        if not self._bearer:
+            logger.warning(
+                "x_api_skip_sin_bearer",
+                medio_id=str(ctx.medio_id),
+                msg="X_API_BEARER no configurado; saltando detector",
+            )
+            return []
+
+        query: str = (
+            ctx.config.get("query")
+            or self._build_query_default(ctx)
+        )
+        max_results = max(10, min(int(ctx.config.get("max_results", 15)), 100))
+
+        try:
+            reserva = await reservar(
+                self._conn, ctx.medio_id, SERVICIO, X_READ_COST_EUR
+            )
+        except BudgetExceeded as err:
+            logger.warning(
+                "x_api_budget_bloquea",
+                medio_id=str(ctx.medio_id),
+                razon=str(err),
+            )
+            return []
+
+        try:
+            params = {
+                "query": query,
+                "max_results": str(max_results),
+                "tweet.fields": "public_metrics,created_at,lang",
+            }
+            headers = {"Authorization": f"Bearer {self._bearer}"}
+            async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
+                resp = await client.get(BASE_URL, params=params, headers=headers)
+            if resp.status_code == 429:
+                # rate limited: liberamos lo reservado y salimos
+                await liberar(self._conn, reserva.presupuesto_id, X_READ_COST_EUR)
+                logger.warning("x_api_429", medio_id=str(ctx.medio_id))
+                return []
+            if resp.status_code >= 400:
+                await liberar(self._conn, reserva.presupuesto_id, X_READ_COST_EUR)
+                logger.warning(
+                    "x_api_error",
+                    status=resp.status_code,
+                    body=resp.text[:200],
+                )
+                return []
+            data: dict[str, Any] = resp.json()
+        except Exception:
+            await liberar(self._conn, reserva.presupuesto_id, X_READ_COST_EUR)
+            raise
+
+        tweets: list[dict[str, Any]] = data.get("data", []) or []
+        senales: list[SenalCruda] = []
+        for tw in tweets:
+            texto = (tw.get("text") or "").strip()
+            if not texto:
+                continue
+            metricas = tw.get("public_metrics", {}) or {}
+            engagement = (
+                int(metricas.get("retweet_count", 0))
+                + int(metricas.get("like_count", 0))
+                + int(metricas.get("reply_count", 0))
+                + int(metricas.get("quote_count", 0))
+            )
+            senales.append(
+                SenalCruda(
+                    origen="x",
+                    termino=texto[:280],
+                    categoria=ctx.categoria_destino,
+                    pais=ctx.pais,
+                    region=None,
+                    velocidad=None,
+                    volumen=engagement,
+                    url_origen=f"https://x.com/i/web/status/{tw.get('id')}" if tw.get("id") else None,
+                    paywall=False,
+                    expira_en_horas=8,   # X envejece rápido
+                    metadatos={
+                        "tweet_id": tw.get("id"),
+                        "created_at": tw.get("created_at"),
+                        "lang": tw.get("lang"),
+                        "metrics": metricas,
+                    },
+                )
+            )
+
+        logger.info(
+            "x_api_ok",
+            medio_id=str(ctx.medio_id),
+            n_senales=len(senales),
+            gasto_tras_eur=str(reserva.gasto_tras_reserva_eur),
+        )
+        return senales
+
+    def _build_query_default(self, ctx: DetectorContext) -> str:
+        partes: list[str] = []
+        if ctx.keywords_obligatorias:
+            partes.append("(" + " OR ".join(f'"{k}"' for k in ctx.keywords_obligatorias) + ")")
+        if ctx.idiomas:
+            partes.append("(" + " OR ".join(f"lang:{l}" for l in ctx.idiomas) + ")")
+        partes.append("-is:retweet")
+        return " ".join(partes)

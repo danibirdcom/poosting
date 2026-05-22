@@ -173,6 +173,21 @@ jobs:
           DATABASE_URL_ADMIN: ${{ secrets.DATABASE_URL_ADMIN_CI }}
         run: uv run pytest tests/ --tb=short -v
 
+      - name: Instalar deps de workers
+        working-directory: workers
+        run: uv sync
+
+      - name: Ruff (lint) — workers
+        working-directory: workers
+        run: uv run ruff check src tests
+
+      - name: Tests de workers
+        working-directory: workers
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_CI }}
+          DATABASE_URL_ADMIN: ${{ secrets.DATABASE_URL_ADMIN_CI }}
+        run: uv run pytest tests/ --tb=short -v
+
       # ------------------------------------------------------------------
       # Cleanup: revocar la regla SIEMPRE, falle o no el job.
       # ------------------------------------------------------------------
