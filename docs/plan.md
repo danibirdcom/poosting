@@ -16,8 +16,9 @@ Lectura obligatoria al inicio de cada sesión grande de trabajo.
   - [x] Resolución de tenant por header `X-Medio-Id`
   - [x] CRUD de redactores como ejemplo de RLS-aware
 - [x] Seeds: entidades Aragón + blacklist de dominios.
-- [x] Test de RLS aislando dos medios.
-- [ ] CI básico (lint + tests no-live) — pendiente.
+- [x] Test de RLS aislando dos medios (USING + WITH CHECK + sin contexto).
+- [x] CI con RDS real (lint + tests). Workflow en `.github/workflows/ci.yml`.
+- [x] Migración 002 con rol grupo `redactia_app` y grants explícitos.
 
 **Criterios de aceptación:**
 - `docker compose up -d` + `make db-migrate` + `make db-seed` deja la BD lista.

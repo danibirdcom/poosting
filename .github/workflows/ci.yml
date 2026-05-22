@@ -1,0 +1,171 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Solo un run por rama a la vez. Evita race conditions abriendo el SG con
+# IPs de runners distintos del mismo PR.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint + tests contra RDS (eu-west-1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      RDS_SG_ID: ${{ secrets.RDS_SG_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      # NOTA: aún no hay tests en dashboard/. Step preparado para cuando los haya.
+
+      - name: Install psql client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # ------------------------------------------------------------------
+      # SG ingress: abrir 5432 a la IP del runner.
+      # El step de cleanup al final del job tiene `if: always()` para que
+      # la regla se revoque incluso si los tests fallan. Si no, las reglas
+      # se acumulan en el SG y eventualmente alcanzan el límite (60).
+      # ------------------------------------------------------------------
+      - name: Detectar IP del runner y abrir SG
+        id: open_sg
+        run: |
+          set -euo pipefail
+          RUNNER_IP=$(curl -fsS https://checkip.amazonaws.com | tr -d '\n')
+          if [[ -z "$RUNNER_IP" ]]; then
+            echo "No se pudo obtener la IP pública del runner" >&2
+            exit 1
+          fi
+          echo "Runner IP: $RUNNER_IP"
+          echo "runner_ip=${RUNNER_IP}" >> "$GITHUB_OUTPUT"
+          # Tolerante a "Duplicate" por si una run previa dejó la regla
+          # (al revoke siempre se llega; pero por seguridad).
+          aws ec2 authorize-security-group-ingress \
+            --group-id "$RDS_SG_ID" \
+            --ip-permissions "IpProtocol=tcp,FromPort=5432,ToPort=5432,IpRanges=[{CidrIp=${RUNNER_IP}/32,Description=ci-${{ github.run_id }}}]" \
+            || aws ec2 describe-security-groups --group-ids "$RDS_SG_ID" \
+                 --query "SecurityGroups[0].IpPermissions[?ToPort==\`5432\`]" \
+                 --output table
+
+      # ------------------------------------------------------------------
+      # Reset de la BD de CI. Se hace SIEMPRE al principio para que cada
+      # run parta de un estado limpio y reproducible.
+      # ------------------------------------------------------------------
+      - name: Reset de la BD de CI
+        env:
+          PGURL: ${{ secrets.DATABASE_URL_ADMIN_CI }}
+        run: |
+          set -euo pipefail
+          psql "$PGURL" -v ON_ERROR_STOP=1 <<'SQL'
+            DROP SCHEMA public CASCADE;
+            CREATE SCHEMA public;
+            CREATE EXTENSION IF NOT EXISTS vector;
+            CREATE EXTENSION IF NOT EXISTS pgcrypto;
+            CREATE EXTENSION IF NOT EXISTS pg_trgm;
+            GRANT USAGE, CREATE ON SCHEMA public TO redactia_app_ci;
+          SQL
+
+      - name: Aplicar migraciones (como admin/owner)
+        env:
+          PGURL: ${{ secrets.DATABASE_URL_ADMIN_CI }}
+        run: |
+          set -euo pipefail
+          for f in $(ls db/migrations/*.sql | sort); do
+            echo ">> aplicando $f"
+            psql "$PGURL" -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+      # Conceder pertenencia al rol grupo. Se hace fuera de la migración
+      # porque el nombre del usuario de app es específico de cada entorno.
+      - name: Conceder rol redactia_app al usuario de CI
+        env:
+          PGURL: ${{ secrets.DATABASE_URL_ADMIN_CI }}
+        run: |
+          psql "$PGURL" -v ON_ERROR_STOP=1 -c "GRANT redactia_app TO redactia_app_ci;"
+
+      - name: Aplicar seeds (como admin)
+        env:
+          PGURL: ${{ secrets.DATABASE_URL_ADMIN_CI }}
+        run: |
+          set -euo pipefail
+          for f in $(ls db/seeds/*.sql 2>/dev/null | sort); do
+            echo ">> seed $f"
+            psql "$PGURL" -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+      # ------------------------------------------------------------------
+      # Tests. El entorno usa DATABASE_URL_CI (rol app no-owner). El test
+      # de RLS usa además DATABASE_URL_ADMIN para crear datos de fixture.
+      # ------------------------------------------------------------------
+      - name: Instalar deps de la API
+        working-directory: api
+        run: uv sync
+
+      - name: Ruff (lint) — api
+        working-directory: api
+        run: uv run ruff check src tests
+
+      - name: Tests de la API
+        working-directory: api
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_CI }}
+          DATABASE_URL_ADMIN: ${{ secrets.DATABASE_URL_ADMIN_CI }}
+        run: uv run pytest tests/ --tb=short -v
+
+      # ------------------------------------------------------------------
+      # Cleanup: revocar la regla SIEMPRE, falle o no el job.
+      # ------------------------------------------------------------------
+      - name: Revocar regla del SG
+        if: always()
+        run: |
+          set +e
+          RUNNER_IP="${{ steps.open_sg.outputs.runner_ip }}"
+          if [[ -z "$RUNNER_IP" ]]; then
+            echo "No hay runner_ip que revocar (open_sg no llegó a ejecutarse)"
+            exit 0
+          fi
+          echo "Revocando $RUNNER_IP/32 del SG $RDS_SG_ID"
+          aws ec2 revoke-security-group-ingress \
+            --group-id "$RDS_SG_ID" \
+            --ip-permissions "IpProtocol=tcp,FromPort=5432,ToPort=5432,IpRanges=[{CidrIp=${RUNNER_IP}/32}]"
+          # Si el revoke falla (regla ya no existe), no marcamos el job
+          # como fallido — el cleanup es best-effort.
+          exit 0

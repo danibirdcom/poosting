@@ -353,17 +353,32 @@ CREATE TABLE licencias_fuentes (
 -- ===========================================================================
 -- Row Level Security
 --
--- Política estándar: el medio_actual debe coincidir con la columna medio_id.
--- Tablas con medio_id NULLable (entidades_catalogo global) tienen policy
--- específica que permite ver entradas globales.
+-- Política estándar para tablas multi-tenant (todas las que tienen columna
+-- medio_id NOT NULL): SELECT/UPDATE/DELETE solo ven filas del medio actual,
+-- INSERT/UPDATE rechaza filas con medio_id ajeno.
+--
+-- - FORCE ROW LEVEL SECURITY: aplica también al owner (redactia_admin).
+--   Sin FORCE, el owner saltaría todas las policies.
+-- - USING + WITH CHECK: sin WITH CHECK los INSERT no se filtran y la app
+--   podría escribir cross-tenant. Crítico.
+-- - current_setting('app.medio_actual', true): el segundo arg `true` evita
+--   error si el setting no está; devuelve NULL → la comparación es NULL →
+--   no aprueba (deny-by-default).
+--
+-- Tablas fuera de este RLS:
+--   - usuarios: no es multi-tenant (un usuario puede pertenecer a varios medios).
+--   - usuarios_medios: es la fuente de verdad de membresía; consultada por
+--     get_request_context antes de fijar el contexto.
+--   - blacklist_dominios: catálogo global de solo lectura.
 -- ===========================================================================
 
+-- Tablas multi-tenant con medio_id NOT NULL. Policy estándar.
 DO $$
 DECLARE
   t TEXT;
 BEGIN
   FOR t IN SELECT unnest(ARRAY[
-    'medios', 'redactores', 'estilos_redactor', 'ejemplos_redactor',
+    'redactores', 'estilos_redactor', 'ejemplos_redactor',
     'variantes_tematicas_redactor', 'correcciones_redactor',
     'senales', 'automatizaciones', 'runs', 'run_steps', 'fuentes_run',
     'drafts', 'imagenes_articulo', 'gsc_metricas', 'scoring_pesos',
@@ -371,50 +386,35 @@ BEGIN
   ]) LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
+    EXECUTE format(
+      'CREATE POLICY tenancy_%1$I ON %1$I '
+      'USING (medio_id = app_current_medio()) '
+      'WITH CHECK (medio_id = app_current_medio())',
+      t
+    );
   END LOOP;
 END $$;
 
--- medios: el id debe coincidir con app_current_medio (excepto superadmin)
-CREATE POLICY medios_isolation ON medios
-  USING (id = app_current_medio() OR app_current_medio() IS NULL);
+-- medios: no es estrictamente multi-tenant (el "tenant" ES esta fila). Pero
+-- queremos que con app_current_medio fijado, la sesión solo vea su propio
+-- medio. Con setting NULL (flujo de login + tareas de admin), permitimos
+-- ver/insertar — el grant restringe quién puede hacer qué.
+ALTER TABLE medios ENABLE ROW LEVEL SECURITY;
+ALTER TABLE medios FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenancy_medios ON medios
+  USING (id = app_current_medio() OR app_current_medio() IS NULL)
+  WITH CHECK (id = app_current_medio() OR app_current_medio() IS NULL);
 
--- Resto de tablas: medio_id = app_current_medio
-CREATE POLICY redactores_isolation ON redactores
-  USING (medio_id = app_current_medio());
-CREATE POLICY estilos_redactor_isolation ON estilos_redactor
-  USING (medio_id = app_current_medio());
-CREATE POLICY ejemplos_redactor_isolation ON ejemplos_redactor
-  USING (medio_id = app_current_medio());
-CREATE POLICY variantes_tematicas_redactor_isolation ON variantes_tematicas_redactor
-  USING (medio_id = app_current_medio());
-CREATE POLICY correcciones_redactor_isolation ON correcciones_redactor
-  USING (medio_id = app_current_medio());
-CREATE POLICY senales_isolation ON senales
-  USING (medio_id = app_current_medio());
-CREATE POLICY automatizaciones_isolation ON automatizaciones
-  USING (medio_id = app_current_medio());
-CREATE POLICY runs_isolation ON runs
-  USING (medio_id = app_current_medio());
-CREATE POLICY run_steps_isolation ON run_steps
-  USING (medio_id = app_current_medio());
-CREATE POLICY fuentes_run_isolation ON fuentes_run
-  USING (medio_id = app_current_medio());
-CREATE POLICY drafts_isolation ON drafts
-  USING (medio_id = app_current_medio());
-CREATE POLICY imagenes_articulo_isolation ON imagenes_articulo
-  USING (medio_id = app_current_medio());
-CREATE POLICY gsc_metricas_isolation ON gsc_metricas
-  USING (medio_id = app_current_medio());
-CREATE POLICY scoring_pesos_isolation ON scoring_pesos
-  USING (medio_id = app_current_medio());
-CREATE POLICY licencias_fuentes_isolation ON licencias_fuentes
-  USING (medio_id = app_current_medio());
-
--- entidades_catalogo: permite ver entradas globales (medio_id IS NULL) Y las
--- del tenant. Las queries cross-tenant globales requieren SECURITY DEFINER.
+-- entidades_catalogo: filas globales (medio_id IS NULL) son visibles por
+-- todos los tenants. Solo se pueden insertar/modificar filas del tenant
+-- propio; la creación de globales requiere admin sin contexto.
 ALTER TABLE entidades_catalogo ENABLE ROW LEVEL SECURITY;
 ALTER TABLE entidades_catalogo FORCE ROW LEVEL SECURITY;
-CREATE POLICY entidades_catalogo_isolation ON entidades_catalogo
-  USING (medio_id IS NULL OR medio_id = app_current_medio());
+CREATE POLICY tenancy_entidades_catalogo ON entidades_catalogo
+  USING (medio_id IS NULL OR medio_id = app_current_medio())
+  WITH CHECK (
+    (medio_id IS NULL AND app_current_medio() IS NULL)
+    OR medio_id = app_current_medio()
+  );
 
 COMMIT;
