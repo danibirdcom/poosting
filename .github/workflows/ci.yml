@@ -143,6 +143,29 @@ jobs:
         working-directory: api
         run: uv run ruff check src tests
 
+      # Diagnóstico: compara host/port/user/db de los dos DSN para detectar
+      # mismatches entre el secret admin y el secret app, y verifica que
+      # el DSN del app user conecta antes de meter a pytest.
+      - name: Diagnóstico de conectividad
+        env:
+          ADMIN_URL: ${{ secrets.DATABASE_URL_ADMIN_CI }}
+          APP_URL: ${{ secrets.DATABASE_URL_CI }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from urllib.parse import urlparse
+          for label, key in [("ADMIN", "ADMIN_URL"), ("APP", "APP_URL")]:
+              raw = os.environ.get(key, "")
+              if not raw:
+                  print(f"{label}: <vacío>")
+                  continue
+              u = urlparse(raw)
+              print(f"{label}: scheme={u.scheme} host={u.hostname} port={u.port} "
+                    f"user={u.username} db={u.path.lstrip('/')} query={u.query}")
+          PY
+          echo "--- probando conexión con APP_URL via psql ---"
+          psql "$APP_URL" -v ON_ERROR_STOP=1 -c "SELECT current_user, current_database();"
+
       - name: Tests de la API
         working-directory: api
         env:
