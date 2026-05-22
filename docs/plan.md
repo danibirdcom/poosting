@@ -3,7 +3,9 @@
 Este documento define las fases del desarrollo y sus criterios de aceptación.
 Lectura obligatoria al inicio de cada sesión grande de trabajo.
 
-## Fase 1 — Cimientos (semana 1-2)
+## Fase 1 — Cimientos (semana 1-2) ✅ CERRADA
+
+**Mergeada:** 2026-05-22 en `75229e3` (PR #1).
 
 **Objetivo:** un entorno reproducible con BD, auth y multi-tenant funcionando.
 
