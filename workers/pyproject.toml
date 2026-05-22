@@ -1,0 +1,42 @@
+[project]
+name = "redactia-workers"
+version = "0.0.1"
+description = "Redactia workers (LangGraph pipeline + cron jobs)"
+requires-python = ">=3.12"
+dependencies = [
+  "asyncpg>=0.30",
+  "pydantic>=2.9",
+  "pydantic-settings>=2.6",
+  "structlog>=24.4",
+  "httpx>=0.28",
+  "anthropic>=0.40",
+  "google-genai>=0.3",
+  "voyageai>=0.3",
+  "langgraph>=0.2",
+  "tenacity>=9.0",
+  "jinja2>=3.1",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "ruff>=0.7",
+  "mypy>=1.13",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "SIM"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = ["live: tests que llaman LLMs reales (cuesta dinero)"]
