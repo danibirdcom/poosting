@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from itertools import pairwise
+
 import pytest
 
 from src.trends.scorer import (
@@ -29,7 +31,7 @@ def test_score_en_rango_0_1() -> None:
 
 def test_freshness_decae_monotono() -> None:
     valores = [decay_freshness(h) for h in [0, 1, 6, 12, 24, 48, 96]]
-    for a, b in zip(valores, valores[1:], strict=True):
+    for a, b in pairwise(valores):
         assert a >= b
 
 

@@ -126,7 +126,9 @@ def parse_feed_items(xml_text: str) -> list[dict[str, Any]]:
     # Atom 1.0
     for entry in root.findall("atom:entry", ns):
         titulo = (entry.findtext("atom:title", default="", namespaces=ns) or "").strip()
-        link_el = entry.find("atom:link[@rel='alternate']", ns) or entry.find("atom:link", ns)
+        link_el = entry.find("atom:link[@rel='alternate']", ns)
+        if link_el is None:
+            link_el = entry.find("atom:link", ns)
         link = link_el.get("href", "").strip() if link_el is not None else ""
         upd = entry.findtext("atom:updated", default="", namespaces=ns) or entry.findtext(
             "atom:published", default="", namespaces=ns
