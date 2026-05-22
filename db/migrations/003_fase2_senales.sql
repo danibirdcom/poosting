@@ -91,8 +91,11 @@ ALTER TABLE senales ADD COLUMN region     TEXT;
 CREATE INDEX ix_senales_embedding ON senales USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX ix_senales_medio_origen ON senales(medio_id, origen);
 CREATE INDEX ix_senales_perfil ON senales(perfil_id);
-CREATE INDEX ix_senales_detectado_no_expirada ON senales(medio_id, detectado_at DESC)
-  WHERE expira_at > NOW();
+-- Para queries del dashboard "top N no expiradas": el filtro `expira_at > NOW()`
+-- va en el WHERE de la query, no en el índice (predicados de índice requieren
+-- funciones IMMUTABLE y NOW() es STABLE). Los índices de score y de expira_at
+-- por separado cubren razonablemente el plan.
+CREATE INDEX ix_senales_expira ON senales(medio_id, expira_at DESC);
 
 -- ---------------------------------------------------------------------------
 -- RLS para tablas nuevas
