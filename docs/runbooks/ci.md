@@ -113,6 +113,57 @@ El RDS de CI no necesita estar siempre encendido. Opciones:
 - **Stop/Start con EventBridge**: parar el RDS fuera de horas. Limitación
   RDS: máx 7 días detenido, luego se autoarranca.
 
+## Convención de BDs y secrets
+
+Cuatro entornos, cuatro responsabilidades:
+
+| Entorno | Dónde vive | Quién la toca | Persistencia |
+|---|---|---|---|
+| `redactia_dev` | Portátil del desarrollador (`docker compose`) | Solo el dev manualmente | Hasta que el dev borre el volumen |
+| `redactia_ci` | RDS compartido eu-west-1 | Workflow `ci.yml` | Resetea cada run (DROP SCHEMA) |
+| `redactia_staging` | Mismo RDS, BD aparte | Workflow `detect-signals.yml` (cron */15) | Persistente. Solo lectura para humanos. |
+| `redactia_prod` | RDS aparte (cuando exista) | Workflow `detect-signals.yml` (cuando lo apuntemos) + API | Persistente. Backup nightly. |
+
+**Reglas duras:**
+
+- CI **nunca** apunta a `redactia_staging` ni a `redactia_prod`. Solo a `redactia_ci` (que puede resetear sin remordimientos).
+- El cron de señales **nunca** apunta a `redactia_ci` (la ejecución posterior del CI le borraría todas las señales acumuladas).
+- `redactia_dev` no aparece nunca en GitHub Secrets. Si necesitas el portátil con datos similares a staging, replícate la BD con `pg_dump` manualmente.
+
+### Secrets por workflow
+
+| Secret | Quién lo usa | A qué BD apunta |
+|---|---|---|
+| `DATABASE_URL_CI` | `ci.yml` (tests app user) | `redactia_ci` con `redactia_app_ci` |
+| `DATABASE_URL_ADMIN_CI` | `ci.yml` (reset + migraciones) | `redactia_ci` con `redactia_admin` |
+| `DATABASE_URL_STAGING` | `detect-signals.yml` | `redactia_staging` con `redactia_app_staging` |
+| `DATABASE_URL_ADMIN_STAGING` | Solo migraciones manuales o futuro workflow | `redactia_staging` con `redactia_admin` |
+| `DATABASE_URL_PROD` | Futuro `detect-signals.yml` cuando lleguemos | `redactia_prod` con `redactia_app_prod` |
+
+### Setup inicial de `redactia_staging`
+
+Una vez (desde tu portátil o un runner privilegiado):
+
+```bash
+# Conexión como master user del RDS
+psql "$ADMIN_RDS_URL" <<SQL
+  CREATE DATABASE redactia_staging;
+  CREATE USER redactia_app_staging LOGIN PASSWORD '<random>';
+  GRANT redactia_app TO redactia_app_staging;
+SQL
+
+# Aplicar migraciones contra la nueva BD
+for f in db/migrations/*.sql; do
+  psql "$ADMIN_RDS_URL/redactia_staging" -v ON_ERROR_STOP=1 -f "$f"
+done
+
+# Onboardear el medio piloto
+DATABASE_URL_ADMIN="$ADMIN_RDS_URL/redactia_staging" python scripts/seed_hoy_aragon.py
+```
+
+Después, configura los secrets `DATABASE_URL_STAGING` y `DATABASE_URL_ADMIN_STAGING`
+en GitHub Settings → Secrets → Actions.
+
 ## Lecciones aprendidas — Fase 1
 
 ### Typo en el secret `DATABASE_URL_CI`

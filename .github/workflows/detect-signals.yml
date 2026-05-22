@@ -80,7 +80,7 @@ jobs:
       - name: Ejecutar detector
         working-directory: workers
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL_DEV }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL_STAGING }}
           VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
           X_API_BEARER: ${{ secrets.X_API_BEARER }}
           LOG_LEVEL: INFO
