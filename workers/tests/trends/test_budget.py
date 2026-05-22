@@ -10,7 +10,7 @@ from uuid import uuid4
 import asyncpg
 import pytest
 
-from src.trends.budget import BudgetExceeded, liberar, reservar
+from src.trends.budget import BudgetExceededError, liberar, reservar
 
 ADMIN_DSN = os.environ.get("DATABASE_URL_ADMIN") or os.environ.get("DATABASE_URL", "")
 APP_DSN = os.environ.get("DATABASE_URL", "")
@@ -23,7 +23,8 @@ async def _crear_medio_y_budget(
 ) -> tuple[str, str]:
     slug = f"test-budget-{uuid4().hex[:8]}"
     medio_id = await admin.fetchval(
-        "INSERT INTO medios (slug, nombre, cms_tipo) VALUES ($1, 'TestBudget', 'custom') RETURNING id",
+        "INSERT INTO medios (slug, nombre, cms_tipo) "
+        "VALUES ($1, 'TestBudget', 'custom') RETURNING id",
         slug,
     )
     # Fijar contexto antes de tocar tablas con FORCE RLS y WITH CHECK por medio_id.
@@ -69,7 +70,7 @@ async def test_reservar_supera_95pct_bloquea() -> None:
         await admin.execute("SELECT set_config('app.medio_actual', $1, false)", medio_id)
         await reservar(admin, medio_id, "x_api", Decimal("9.0"))
         # 9 + 1 = 10 > 9.5 → debe lanzar
-        with pytest.raises(BudgetExceeded):
+        with pytest.raises(BudgetExceededError):
             await reservar(admin, medio_id, "x_api", Decimal("1.0"))
         # Pero un importe pequeño que mantiene <= 9.5 sí pasa
         ok = await reservar(admin, medio_id, "x_api", Decimal("0.4"))
@@ -89,7 +90,7 @@ async def test_reservar_sin_budget_configurado_lanza_excepcion() -> None:
     )
     try:
         await admin.execute("SELECT set_config('app.medio_actual', $1, false)", str(medio_id))
-        with pytest.raises(BudgetExceeded):
+        with pytest.raises(BudgetExceededError):
             await reservar(admin, medio_id, "x_api", Decimal("0.01"))
     finally:
         await admin.execute("SELECT set_config('app.medio_actual', '', false)")

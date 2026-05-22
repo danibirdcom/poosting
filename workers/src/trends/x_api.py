@@ -23,7 +23,7 @@ import httpx
 import structlog
 
 from .base import DetectorContext, SenalCruda
-from .budget import BudgetExceeded, liberar, reservar
+from .budget import BudgetExceededError, liberar, reservar
 
 logger = structlog.get_logger(__name__)
 
@@ -67,7 +67,7 @@ class XApiDetector:
             reserva = await reservar(
                 self._conn, ctx.medio_id, SERVICIO, X_READ_COST_EUR
             )
-        except BudgetExceeded as err:
+        except BudgetExceededError as err:
             logger.warning(
                 "x_api_budget_bloquea",
                 medio_id=str(ctx.medio_id),
@@ -115,6 +115,8 @@ class XApiDetector:
                 + int(metricas.get("reply_count", 0))
                 + int(metricas.get("quote_count", 0))
             )
+            tweet_id = tw.get("id")
+            url_tweet = f"https://x.com/i/web/status/{tweet_id}" if tweet_id else None
             senales.append(
                 SenalCruda(
                     origen="x",
@@ -124,7 +126,7 @@ class XApiDetector:
                     region=None,
                     velocidad=None,
                     volumen=engagement,
-                    url_origen=f"https://x.com/i/web/status/{tw.get('id')}" if tw.get("id") else None,
+                    url_origen=url_tweet,
                     paywall=False,
                     expira_en_horas=8,   # X envejece rápido
                     metadatos={
@@ -149,6 +151,6 @@ class XApiDetector:
         if ctx.keywords_obligatorias:
             partes.append("(" + " OR ".join(f'"{k}"' for k in ctx.keywords_obligatorias) + ")")
         if ctx.idiomas:
-            partes.append("(" + " OR ".join(f"lang:{l}" for l in ctx.idiomas) + ")")
+            partes.append("(" + " OR ".join(f"lang:{lang}" for lang in ctx.idiomas) + ")")
         partes.append("-is:retweet")
         return " ".join(partes)

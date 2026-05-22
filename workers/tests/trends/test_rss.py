@@ -5,12 +5,12 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+from src.trends.base import DetectorContext
 from src.trends.rss import (
     _es_dominio_paywall,
     _pasa_keywords,
     parse_feed_items,
 )
-from src.trends.base import DetectorContext
 
 
 def _ctx(**kwargs) -> DetectorContext:

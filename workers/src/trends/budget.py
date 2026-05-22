@@ -21,7 +21,7 @@ logger = structlog.get_logger(__name__)
 UMBRAL_FRACCION = Decimal("0.95")
 
 
-class BudgetExceeded(RuntimeError):
+class BudgetExceededError(RuntimeError):
     """El budget mensual de (medio, servicio) está agotado o se superaría."""
 
 
@@ -46,8 +46,8 @@ async def reservar(
     """Reserva ``coste_estimado_eur`` contra el budget de (medio, servicio).
 
     - Si no existe budget configurado para ese (medio, servicio, mes_ref),
-      lanza ``BudgetExceeded`` (failsafe: sin budget explícito = no se gasta).
-    - Si la reserva superaría el 95% del budget, lanza ``BudgetExceeded``.
+      lanza ``BudgetExceededError`` (failsafe: sin budget explícito = no se gasta).
+    - Si la reserva superaría el 95% del budget, lanza ``BudgetExceededError``.
     - En éxito, devuelve la reserva. NO requiere commit posterior: el caller
       debe estar dentro de su propia transacción.
     """
@@ -87,7 +87,7 @@ async def reservar(
             coste_eur=str(coste_estimado_eur),
             razon=razon,
         )
-        raise BudgetExceeded(f"{servicio}: {razon}")
+        raise BudgetExceededError(f"{servicio}: {razon}")
 
     return BudgetReservation(
         presupuesto_id=row["id"],

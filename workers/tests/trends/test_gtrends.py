@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from src.trends.base import DetectorContext
-from src.trends.gtrends import GTrendsDetector, JSON_PREFIX, _parse_volumen
+from src.trends.gtrends import JSON_PREFIX, GTrendsDetector, _parse_volumen
 
 
 def _ctx_gtrends(geos=None) -> DetectorContext:
