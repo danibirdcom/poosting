@@ -1,0 +1,11 @@
+# Dominios excluidos como fuentes verificables. Una entrada por línea.
+# Formato: <dominio>|<razon>
+# Cargado a la tabla `blacklist_dominios` por scripts/load_blacklist.py
+4chan.org|foro anónimo sin verificación
+8kun.top|foro anónimo sin verificación
+naturalnews.com|historial de desinformación
+infowars.com|historial de desinformación
+beforeitsnews.com|agregador sin verificación
+sputniknews.com|propaganda estatal sin verificación independiente
+rt.com|propaganda estatal sin verificación independiente
+zerohedge.com|sesgo y baja verificación
