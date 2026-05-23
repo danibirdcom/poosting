@@ -86,11 +86,14 @@ PERFILES = [
                 "usar_solo_como_senal": False,
             },
             {
+                # GTrends: solo geo nivel país. ES-AR (Aragón) no es un código
+                # válido en el endpoint de daily trends. Ver
+                # docs/agents/trend_detector.md §"Limitaciones".
                 "detector": "gtrends",
                 "origen_url": None,
                 "cron_expr": "*/30 * * * *",
                 "config": {
-                    "geos": [{"geo": "ES-AR", "peso": 0.7}, {"geo": "ES", "peso": 0.3}],
+                    "geos": [{"geo": "ES", "peso": 1.0}],
                     "max_resultados": 20,
                 },
                 "usar_solo_como_senal": False,

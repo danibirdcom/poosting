@@ -2,12 +2,25 @@
 
 Usa el endpoint público de "daily trends" sin clave (sujeto a rate limit no
 documentado). Para cada ``geo`` configurado en ``ctx.config['geos']`` extrae
-las búsquedas trending. Aplica peso por región para que ES-AR cuente más
-que ES en perfiles aragoneses.
+las búsquedas trending.
 
-Forma del config:
-    geos: [{"geo": "ES-AR", "peso": 0.70}, {"geo": "ES", "peso": 0.30}]
+⚠️ Limitaciones conocidas (Fase 2, ver `docs/agents/trend_detector.md`):
+- Google **no soporta granularidad de comunidad autónoma** en este
+  endpoint. ``ES-AR`` devuelve 404. Sólo códigos de país (``ES``, ``FR``,
+  ``GB``, etc.) son válidos. El multiplicador de región del scorer se
+  vuelve un no-op cuando todas las geos son nivel país.
+- Google bloquea User-Agents que parezcan bots (entre ellos versiones
+  antiguas o cadenas tipo "compatible; Redactia"). Usamos un UA realista
+  de Chrome (ver constante ``USER_AGENT``).
+- Si Google migra el endpoint, devolverá 404. El detector responde con
+  lista vacía y log warning, no rompe el pipeline.
+
+Forma del config (Fase 2):
+    geos: [{"geo": "ES", "peso": 1.0}]
     max_resultados: 20
+
+Follow-up Fase 2.5: investigar pytrends / endpoint nuevo si Google
+deprecia este definitivamente.
 """
 
 from __future__ import annotations
@@ -25,7 +38,12 @@ logger = structlog.get_logger(__name__)
 
 BASE_URL = "https://trends.google.com/trends/api/dailytrends"
 TIMEOUT_S = 15.0
-USER_AGENT = "Mozilla/5.0 (compatible; Redactia/0.1)"
+# User-Agent realista de Chrome: Google devuelve 404 a UAs con palabras
+# como "bot", "crawler" o cadenas custom.
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 # Google prefija la respuesta con ")]}'," para evitar JSON hijacking.
 JSON_PREFIX = ")]}',"
 
@@ -65,6 +83,20 @@ class GTrendsDetector:
 
         params = {"hl": "es-ES", "tz": "-120", "geo": geo, "ns": "15"}
         resp = await client.get(BASE_URL, params=params)
+        if resp.status_code == 404:
+            # Geo no válido o endpoint deprecado. Log y devuelve vacío en
+            # lugar de romper. Si veo este warning de forma persistente,
+            # tocar revisar la configuración de seed_hoy_aragon.py o
+            # marcar la fuente como activo=FALSE.
+            logger.warning(
+                "gtrends_404",
+                geo=geo,
+                msg="endpoint devolvió 404; geo no válida o API deprecada",
+            )
+            return []
+        if resp.status_code == 429:
+            logger.warning("gtrends_429", geo=geo)
+            return []
         resp.raise_for_status()
         text = resp.text
         if text.startswith(JSON_PREFIX):
