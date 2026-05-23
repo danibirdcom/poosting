@@ -62,8 +62,15 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      - name: Instalar psql para probe de conectividad
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client
+
       - name: Abrir SG
         id: open_sg
+        env:
+          PGURL: ${{ secrets.DATABASE_URL_STAGING }}
         run: |
           set -euo pipefail
           RUNNER_IP=$(curl -fsS https://checkip.amazonaws.com | tr -d '\n')
@@ -72,6 +79,23 @@ jobs:
             --group-id "$RDS_SG_ID" \
             --ip-permissions "IpProtocol=tcp,FromPort=5432,ToPort=5432,IpRanges=[{CidrIp=${RUNNER_IP}/32,Description=detect-${{ github.run_id }}}]" \
             || true
+          # Esperar propagación de la regla SG. AWS suele tardar 1-10s.
+          # Sin esto, asyncpg.connect() en el CLI cae con TimeoutError
+          # porque arranca antes de que el SG se entere.
+          if [ -z "${PGURL:-}" ]; then
+            echo "WARN: DATABASE_URL_STAGING vacío; salto probe (el CLI fallará si esto persiste)"
+            exit 0
+          fi
+          echo "Esperando propagación de la regla SG..."
+          for i in $(seq 1 15); do
+            if psql "$PGURL" -c "SELECT 1" >/dev/null 2>&1; then
+              echo "BD accesible tras ${i} intentos (~$((i*2))s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "ERROR: BD no accesible en 30s tras abrir SG" >&2
+          exit 1
 
       - name: Instalar deps de workers
         working-directory: workers
