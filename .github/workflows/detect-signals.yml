@@ -1,12 +1,9 @@
 name: Detect signals
 
-# Cron cada 15 min + dispatch manual. Mientras dure Fase 2-2.5, este job
-# sustituye a los workers daemon. Cuando provisione EC2/Coolify y montemos
-# BullMQ, este workflow se desactiva (cron) y queda sólo `workflow_dispatch`
-# como botón de pánico.
+# Durante las 72h iniciales de validación manual de Fase 2: SOLO
+# workflow_dispatch. El cron queda comentado hasta confirmar volumen,
+# gasto X y feeds descubiertos. Decisión en docs/runbooks/scheduling.md.
 on:
-  schedule:
-    - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       medio_slug:
@@ -17,6 +14,12 @@ on:
         description: "Filtrar a un detector: rss|gtrends|gdelt|x (vacío = todos)"
         required: false
         default: ""
+  # schedule:
+  #   - cron: "*/15 * * * *"
+  # ☝️ Reactivar tras 72h sin incidencias en runs manuales (validación
+  # de volumen + gasto X + feeds). Cuando se reactive, considerar bajar
+  # a "*/30" mientras quede sólo Hoy Aragón onboardeado (los otros 2
+  # medios del matrix son no-ops por ahora).
 
 concurrency:
   group: detect-signals
