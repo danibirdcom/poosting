@@ -24,9 +24,9 @@ import structlog
 from src.llm.embeddings import EmbeddingsClient, VoyageEmbeddings
 from src.trends.gdelt import GDELTDetector
 from src.trends.gtrends import GTrendsDetector
-from src.trends.persistence import tenant_connection
+from src.trends.persistence import get_pool
 from src.trends.rss import RSSDetector
-from src.trends.runner import ejecutar_fuente
+from src.trends.runner import EjecucionResultado, ejecutar_fuente
 from src.trends.x_api import XApiDetector
 
 logger = structlog.get_logger(__name__)
@@ -79,8 +79,6 @@ _FAIL_FRACTION_DEFAULT = 0.5
 
 
 async def cmd_detect(args: argparse.Namespace) -> int:
-    from src.trends.persistence import get_pool
-
     dsn = os.environ["DATABASE_URL"]
     medio_id = await _resolver_medio(dsn, args.medio_slug)
     if medio_id is None:
@@ -92,41 +90,59 @@ async def cmd_detect(args: argparse.Namespace) -> int:
     embeddings: EmbeddingsClient = VoyageEmbeddings()
     pool = await get_pool(dsn)
 
-    async with tenant_connection(dsn, medio_id) as conn:
+    # Lectura de fuentes en una conn aparte (autocommit, sin tx). Cada
+    # ``ejecutar_fuente`` adquirirá su propia conn y manejará su transacción.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "SELECT set_config('app.medio_actual', $1, false)", str(medio_id)
+        )
         filtros = ["medio_id = $1", "activo = TRUE"]
         params: list[Any] = [medio_id]
         if args.detector:
             filtros.append(f"detector = ${len(params) + 1}")
             params.append(args.detector)
         fuentes = await conn.fetch(
-            "SELECT id, detector FROM fuentes_configuradas WHERE " + " AND ".join(filtros),
+            "SELECT id, detector FROM fuentes_configuradas WHERE "
+            + " AND ".join(filtros),
             *params,
         )
 
-        if not fuentes:
-            logger.info("sin_fuentes", medio=args.medio_slug, detector=args.detector)
-            print(f"[{args.medio_slug}] sin fuentes activas", file=sys.stderr)
-            return 0
+    if not fuentes:
+        logger.info("sin_fuentes", medio=args.medio_slug, detector=args.detector)
+        print(f"[{args.medio_slug}] sin fuentes activas", file=sys.stderr)
+        return 0
 
-        # Conteo por estado para el resumen final.
-        conteo: dict[str, int] = {"ok": 0, "sin_resultados": 0, "error": 0, "otros": 0}
-        for f in fuentes:
-            det = _build_detector(f["detector"], pool)
-            resultado = await ejecutar_fuente(conn, f["id"], det, embeddings)
-            logger.info(
-                "fuente_ejecutada",
-                medio=args.medio_slug,
-                fuente_id=str(resultado.fuente_id),
-                detector=f["detector"],
-                detectadas=resultado.n_detectadas,
-                insertadas=resultado.n_insertadas,
-                actualizadas=resultado.n_actualizadas,
-                estado=resultado.estado,
+    # Conteo por estado para el resumen final. Cada fuente se ejecuta en
+    # aislamiento: si una explota, las demás siguen. ejecutar_fuente captura
+    # internamente cualquier excepción y devuelve estado='error'; el try/except
+    # aquí es solo defensa en profundidad por si hay un bug en el aislamiento.
+    conteo: dict[str, int] = {"ok": 0, "sin_resultados": 0, "error": 0, "otros": 0}
+    for f in fuentes:
+        det = _build_detector(f["detector"], pool)
+        try:
+            resultado = await ejecutar_fuente(
+                pool, medio_id, f["id"], det, embeddings
             )
-            if resultado.estado in conteo:
-                conteo[resultado.estado] += 1
-            else:
-                conteo["otros"] += 1
+        except Exception:
+            logger.exception(
+                "ejecutar_fuente_exterior_fallo", fuente_id=str(f["id"])
+            )
+            resultado = EjecucionResultado(f["id"], 0, 0, 0, "error")
+
+        logger.info(
+            "fuente_ejecutada",
+            medio=args.medio_slug,
+            fuente_id=str(resultado.fuente_id),
+            detector=f["detector"],
+            detectadas=resultado.n_detectadas,
+            insertadas=resultado.n_insertadas,
+            actualizadas=resultado.n_actualizadas,
+            estado=resultado.estado,
+        )
+        if resultado.estado in conteo:
+            conteo[resultado.estado] += 1
+        else:
+            conteo["otros"] += 1
 
     total = len(fuentes)
     ok = conteo["ok"]
