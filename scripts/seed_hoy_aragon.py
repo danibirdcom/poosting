@@ -72,14 +72,14 @@ PERFILES = [
                 "detector": "rss",
                 "origen_url": (
                     "https://news.google.com/rss/search"
-                    "?q=Arag%C3%B3n+pol%C3%ADtica+OR+Az%C3%B3n+OR+DGA"
+                    "?q=Arag%C3%B3n+pol%C3%ADtica+OR+Azc%C3%B3n+OR+DGA"
                     "&hl=es&gl=ES&ceid=ES:es"
                 ),
                 "cron_expr": "*/15 * * * *",
                 "config": {
                     "feeds": [
                         "https://news.google.com/rss/search"
-                        "?q=Arag%C3%B3n+pol%C3%ADtica+OR+Az%C3%B3n+OR+DGA"
+                        "?q=Arag%C3%B3n+pol%C3%ADtica+OR+Azc%C3%B3n+OR+DGA"
                         "&hl=es&gl=ES&ceid=ES:es"
                     ]
                 },
