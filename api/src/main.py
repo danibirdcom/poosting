@@ -20,6 +20,9 @@ def _setup_logging() -> None:
         processors=[
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
+            # Renderiza traceback completo cuando exc_info=True. Sin este
+            # processor el traceback se pierde y solo queda "exc_info": true.
+            structlog.processors.format_exc_info,
             structlog.processors.JSONRenderer(),
         ],
     )

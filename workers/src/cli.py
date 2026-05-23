@@ -38,6 +38,10 @@ def _setup_logging() -> None:
         processors=[
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
+            # Renderiza el traceback como string cuando exc_info=True
+            # (lo activa logger.exception). Sin esto el campo aparece como
+            # "exc_info": true literal y la traza se pierde.
+            structlog.processors.format_exc_info,
             structlog.processors.JSONRenderer(),
         ],
     )
@@ -68,6 +72,12 @@ def _build_detector(
     raise ValueError(f"detector desconocido: {nombre}")
 
 
+# Umbral de fallo: si la fracción de fuentes en estado 'error' supera este
+# valor, el CLI termina con exit code 2 para que el job de GH Actions se
+# marque rojo. Configurable vía env REDACTIA_FAIL_FRACTION.
+_FAIL_FRACTION_DEFAULT = 0.5
+
+
 async def cmd_detect(args: argparse.Namespace) -> int:
     from src.trends.persistence import get_pool
 
@@ -77,6 +87,7 @@ async def cmd_detect(args: argparse.Namespace) -> int:
         # Esperado en Fase 2 mientras solo Hoy Aragón está onboardeado: el matrix
         # del workflow contiene los 3 medios. No queremos rojo por eso.
         logger.info("medio_no_onboardado_skip", medio=args.medio_slug)
+        print(f"[{args.medio_slug}] medio no onboardado — skip", file=sys.stderr)
         return 0
     embeddings: EmbeddingsClient = VoyageEmbeddings()
     pool = await get_pool(dsn)
@@ -94,8 +105,11 @@ async def cmd_detect(args: argparse.Namespace) -> int:
 
         if not fuentes:
             logger.info("sin_fuentes", medio=args.medio_slug, detector=args.detector)
+            print(f"[{args.medio_slug}] sin fuentes activas", file=sys.stderr)
             return 0
 
+        # Conteo por estado para el resumen final.
+        conteo: dict[str, int] = {"ok": 0, "sin_resultados": 0, "error": 0, "otros": 0}
         for f in fuentes:
             det = _build_detector(f["detector"], pool)
             resultado = await ejecutar_fuente(conn, f["id"], det, embeddings)
@@ -109,6 +123,40 @@ async def cmd_detect(args: argparse.Namespace) -> int:
                 actualizadas=resultado.n_actualizadas,
                 estado=resultado.estado,
             )
+            if resultado.estado in conteo:
+                conteo[resultado.estado] += 1
+            else:
+                conteo["otros"] += 1
+
+    total = len(fuentes)
+    ok = conteo["ok"]
+    sin_resultados = conteo["sin_resultados"]
+    errores = conteo["error"] + conteo["otros"]
+
+    # Resumen visible en stdout (NO JSON) para que aparezca legible en el
+    # output del step de GH Actions.
+    print(
+        f"[{args.medio_slug}] {ok}/{total} OK, {sin_resultados} sin_resultados, "
+        f"{errores}/{total} errores",
+        file=sys.stderr,
+    )
+
+    # Exit code != 0 si la fracción de errores supera el umbral. Por defecto
+    # 0.5: si más de la mitad de las fuentes fallan, falla el job. Configurable
+    # vía env para casos especiales (p.ej. arranque con muchas fuentes nuevas).
+    try:
+        umbral = float(os.environ.get("REDACTIA_FAIL_FRACTION", _FAIL_FRACTION_DEFAULT))
+    except ValueError:
+        umbral = _FAIL_FRACTION_DEFAULT
+    if total > 0 and (errores / total) > umbral:
+        logger.error(
+            "cli_exit_fallo_masivo",
+            medio=args.medio_slug,
+            errores=errores,
+            total=total,
+            umbral=umbral,
+        )
+        return 2
     return 0
 
 
