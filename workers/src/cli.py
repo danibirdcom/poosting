@@ -38,6 +38,10 @@ def _setup_logging() -> None:
         processors=[
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
+            # Renderiza el traceback como string cuando exc_info=True
+            # (lo activa logger.exception). Sin esto el campo aparece como
+            # "exc_info": true literal y la traza se pierde.
+            structlog.processors.format_exc_info,
             structlog.processors.JSONRenderer(),
         ],
     )

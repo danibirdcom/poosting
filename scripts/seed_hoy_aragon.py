@@ -120,6 +120,15 @@ async def main() -> int:
         return 1
 
     conn = await asyncpg.connect(DSN)
+    # Codec JSONB para poder pasar dict directamente como parámetro.
+    # Replica lo que hace workers/src/trends/persistence.py::_init_conn.
+    for jsontype in ("jsonb", "json"):
+        await conn.set_type_codec(
+            jsontype,
+            encoder=lambda v: v if isinstance(v, str) else json.dumps(v, default=str),
+            decoder=json.loads,
+            schema="pg_catalog",
+        )
     try:
         async with conn.transaction():
             medio_id = await conn.fetchval(
@@ -203,20 +212,23 @@ async def main() -> int:
                     )
                     if ya_existe:
                         continue
+                    # `config` se pasa como dict; el codec JSONB del pool lo
+                    # serializa. Si quitas `init=_init_conn` del pool, esto
+                    # falla con "expected str, got dict".
                     await conn.execute(
                         """
                         INSERT INTO fuentes_configuradas (
                           medio_id, perfil_id, detector, origen_url, cron_expr,
                           config, usar_solo_como_senal
                         )
-                        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7)
                         """,
                         medio_id,
                         perfil_id,
                         f["detector"],
                         f["origen_url"],
                         f["cron_expr"],
-                        json.dumps(f["config"]),
+                        f["config"],
                         f["usar_solo_como_senal"],
                     )
                     insertadas += 1

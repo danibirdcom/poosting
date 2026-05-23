@@ -7,6 +7,7 @@ declaradas en ``001_initial.sql`` leen ese setting.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from uuid import UUID
@@ -21,6 +22,22 @@ logger = structlog.get_logger(__name__)
 _pool: asyncpg.Pool | None = None
 
 
+async def _init_conn(conn: asyncpg.Connection) -> None:
+    """Registra codecs JSONB/JSON en cada conexión nueva del pool.
+
+    Sin esto asyncpg devuelve columnas JSONB como ``str`` crudo y cualquier
+    código que haga ``row["cms_config"].get(...)`` falla con
+    ``'str' object has no attribute 'get'``.
+    """
+    for jsontype in ("jsonb", "json"):
+        await conn.set_type_codec(
+            jsontype,
+            encoder=lambda v: v if isinstance(v, str) else json.dumps(v, default=str),
+            decoder=json.loads,
+            schema="pg_catalog",
+        )
+
+
 async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
@@ -30,6 +47,7 @@ async def get_pool() -> asyncpg.Pool:
             min_size=2,
             max_size=20,
             command_timeout=30,
+            init=_init_conn,
         )
         logger.info("db_pool_created", min_size=2, max_size=20)
     return _pool

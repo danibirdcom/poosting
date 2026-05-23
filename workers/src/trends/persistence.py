@@ -2,6 +2,11 @@
 
 Reaprovecha el mismo patrón que ``api/src/db/pool.py``: fija
 ``app.medio_actual`` por transacción para que RLS filtre correctamente.
+
+Registra codecs JSONB/JSON al inicializar cada conexión del pool. Sin esto
+asyncpg devuelve columnas JSONB como ``str`` crudo y cualquier código que
+haga ``row["config"].get(...)`` falla con
+``'str' object has no attribute 'get'``.
 """
 
 from __future__ import annotations
@@ -21,10 +26,32 @@ logger = structlog.get_logger(__name__)
 _pool: asyncpg.Pool | None = None
 
 
+async def _init_conn(conn: asyncpg.Connection) -> None:
+    """Hook ``init`` del pool: registra codecs JSONB/JSON.
+
+    Encoder ``json.dumps`` permite pasar ``dict`` directamente como parámetro
+    de INSERT/UPDATE. Decoder ``json.loads`` hace que las lecturas devuelvan
+    ``dict``/``list``, no ``str``.
+    """
+    for jsontype in ("jsonb", "json"):
+        await conn.set_type_codec(
+            jsontype,
+            encoder=lambda v: v if isinstance(v, str) else json.dumps(v, default=str),
+            decoder=json.loads,
+            schema="pg_catalog",
+        )
+
+
 async def get_pool(dsn: str) -> asyncpg.Pool:
     global _pool
     if _pool is None:
-        _pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=5, command_timeout=30)
+        _pool = await asyncpg.create_pool(
+            dsn=dsn,
+            min_size=1,
+            max_size=5,
+            command_timeout=30,
+            init=_init_conn,
+        )
     return _pool
 
 
@@ -78,6 +105,7 @@ async def insertar_senal(
     now = now or datetime.utcnow()
     expira_at = now + timedelta(hours=expira_en_horas)
 
+    # `metadatos` se pasa como dict; el codec JSONB del pool lo serializa.
     senal_id = await conn.fetchval(
         """
         INSERT INTO senales (
@@ -87,7 +115,7 @@ async def insertar_senal(
         )
         VALUES (
           $1, $2, $3, $4, $5, $6,
-          $7, $8, $9::jsonb, $10, $11,
+          $7, $8, $9, $10, $11,
           $12, $13, $14, $15::vector, $16, $17
         )
         RETURNING id
@@ -100,7 +128,7 @@ async def insertar_senal(
         score,
         velocidad,
         volumen,
-        _to_jsonb(metadatos),
+        metadatos,
         now,
         expira_at,
         paywall,
@@ -111,10 +139,6 @@ async def insertar_senal(
         region,
     )
     return senal_id
-
-
-def _to_jsonb(d: dict[str, Any]) -> str:
-    return json.dumps(d, ensure_ascii=False, default=str)
 
 
 async def marcar_ejecucion_fuente(
