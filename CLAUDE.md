@@ -234,7 +234,14 @@ senales (
   volumen         INT,
   metadatos       JSONB,
   detectado_at    TIMESTAMPTZ DEFAULT NOW(),
-  expira_at       TIMESTAMPTZ               -- señal "fresca" durante N horas
+  expira_at       TIMESTAMPTZ,             -- señal "fresca" durante N horas
+  -- añadidos en Fase 2 (migración 003):
+  paywall         BOOLEAN NOT NULL DEFAULT FALSE,  -- fuente con paywall: NO citar en redacción
+  perfil_id       UUID REFERENCES perfiles_deteccion(id) ON DELETE SET NULL,
+  fuente_id       UUID REFERENCES fuentes_configuradas(id) ON DELETE SET NULL,
+  embedding       vector(1024),            -- dedupe semántico (HNSW)
+  url_origen      TEXT,
+  region          TEXT                     -- 'ES', 'ES-AR', ...
 );
 
 fuentes_run (
@@ -248,6 +255,61 @@ fuentes_run (
   citado_en_articulo BOOLEAN DEFAULT FALSE
 );
 ```
+
+#### Tablas de Fase 2 (detección)
+
+Fuente de verdad: `db/migrations/003_fase2_senales.sql`. Estos son los
+schemas **reales**, no las specs originales (que pasaron por refinamientos
+durante la implementación — ver `docs/agents/trend_detector.md` §"Schema final Fase 2").
+
+```sql
+perfiles_deteccion (
+  id                    UUID PRIMARY KEY,
+  medio_id              UUID REFERENCES medios(id) NOT NULL,
+  nombre                TEXT NOT NULL,
+  descripcion           TEXT,
+  pais                  TEXT NOT NULL DEFAULT 'ES',
+  idiomas               TEXT[] NOT NULL DEFAULT ARRAY['es'],
+  keywords_obligatorias TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+  keywords_negativas    TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+  categoria_destino     TEXT NOT NULL,
+  activo                BOOLEAN NOT NULL DEFAULT TRUE,
+  ttl_dias              INT NOT NULL DEFAULT 90 CHECK (ttl_dias > 0),
+  creado_at             TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (medio_id, nombre)
+);
+
+fuentes_configuradas (
+  id                    UUID PRIMARY KEY,
+  medio_id              UUID REFERENCES medios(id) NOT NULL,
+  perfil_id             UUID REFERENCES perfiles_deteccion(id) NOT NULL,
+  detector              TEXT NOT NULL CHECK (detector IN ('rss','gtrends','gdelt','x')),
+  origen_url            TEXT,                       -- URL principal cuando aplica (RSS)
+  cron_expr             TEXT NOT NULL,
+  config                JSONB NOT NULL DEFAULT '{}',
+  usar_solo_como_senal  BOOLEAN NOT NULL DEFAULT FALSE,
+  activo                BOOLEAN NOT NULL DEFAULT TRUE,
+  creado_at             TIMESTAMPTZ DEFAULT NOW(),
+  ultima_ejec_at        TIMESTAMPTZ,
+  ultima_ejec_estado    TEXT
+);
+
+-- Cap mensual por servicio externo. No hay columna `hard_stop_fraccion`:
+-- el umbral (0.95) está hard-coded en workers/src/trends/budget.py.
+-- Ver docs/runbooks/budget.md.
+presupuestos_api (
+  id                    UUID PRIMARY KEY,
+  medio_id              UUID REFERENCES medios(id) NOT NULL,
+  servicio              TEXT NOT NULL,              -- 'x_api', 'voyage', ...
+  budget_mensual_eur    NUMERIC(10,4) NOT NULL CHECK (budget_mensual_eur > 0),
+  gasto_mes_actual_eur  NUMERIC(10,4) NOT NULL DEFAULT 0 CHECK (gasto_mes_actual_eur >= 0),
+  mes_ref               DATE NOT NULL,              -- primer día del mes
+  actualizado_at        TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (medio_id, servicio, mes_ref)
+);
+```
+
+Todas con RLS + FORCE + WITH CHECK por `medio_id`, y grants a `redactia_app`.
 
 ### 4.4 Runs, drafts y artículos
 

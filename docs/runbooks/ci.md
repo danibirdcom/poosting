@@ -112,3 +112,96 @@ El RDS de CI no necesita estar siempre encendido. Opciones:
 - **db.t4g.micro**: barato pero siempre encendido (~13 €/mes).
 - **Stop/Start con EventBridge**: parar el RDS fuera de horas. Limitación
   RDS: máx 7 días detenido, luego se autoarranca.
+
+## Convención de BDs y secrets
+
+Cuatro entornos, cuatro responsabilidades:
+
+| Entorno | Dónde vive | Quién la toca | Persistencia |
+|---|---|---|---|
+| `redactia_dev` | Portátil del desarrollador (`docker compose`) | Solo el dev manualmente | Hasta que el dev borre el volumen |
+| `redactia_ci` | RDS compartido eu-west-1 | Workflow `ci.yml` | Resetea cada run (DROP SCHEMA) |
+| `redactia_staging` | Mismo RDS, BD aparte | Workflow `detect-signals.yml` (cron */15) | Persistente. Solo lectura para humanos. |
+| `redactia_prod` | RDS aparte (cuando exista) | Workflow `detect-signals.yml` (cuando lo apuntemos) + API | Persistente. Backup nightly. |
+
+**Reglas duras:**
+
+- CI **nunca** apunta a `redactia_staging` ni a `redactia_prod`. Solo a `redactia_ci` (que puede resetear sin remordimientos).
+- El cron de señales **nunca** apunta a `redactia_ci` (la ejecución posterior del CI le borraría todas las señales acumuladas).
+- `redactia_dev` no aparece nunca en GitHub Secrets. Si necesitas el portátil con datos similares a staging, replícate la BD con `pg_dump` manualmente.
+
+### Secrets por workflow
+
+| Secret | Quién lo usa | A qué BD apunta |
+|---|---|---|
+| `DATABASE_URL_CI` | `ci.yml` (tests app user) | `redactia_ci` con `redactia_app_ci` |
+| `DATABASE_URL_ADMIN_CI` | `ci.yml` (reset + migraciones) | `redactia_ci` con `redactia_admin` |
+| `DATABASE_URL_STAGING` | `detect-signals.yml` | `redactia_staging` con `redactia_app_staging` |
+| `DATABASE_URL_ADMIN_STAGING` | Solo migraciones manuales o futuro workflow | `redactia_staging` con `redactia_admin` |
+| `DATABASE_URL_PROD` | Futuro `detect-signals.yml` cuando lleguemos | `redactia_prod` con `redactia_app_prod` |
+
+### Setup inicial de `redactia_staging`
+
+Una vez (desde tu portátil o un runner privilegiado):
+
+```bash
+# Conexión como master user del RDS
+psql "$ADMIN_RDS_URL" <<SQL
+  CREATE DATABASE redactia_staging;
+  CREATE USER redactia_app_staging LOGIN PASSWORD '<random>';
+  GRANT redactia_app TO redactia_app_staging;
+SQL
+
+# Aplicar migraciones contra la nueva BD
+for f in db/migrations/*.sql; do
+  psql "$ADMIN_RDS_URL/redactia_staging" -v ON_ERROR_STOP=1 -f "$f"
+done
+
+# Onboardear el medio piloto
+DATABASE_URL_ADMIN="$ADMIN_RDS_URL/redactia_staging" python scripts/seed_hoy_aragon.py
+```
+
+Después, configura los secrets `DATABASE_URL_STAGING` y `DATABASE_URL_ADMIN_STAGING`
+en GitHub Settings → Secrets → Actions.
+
+## Lecciones aprendidas — Fase 1
+
+### Typo en el secret `DATABASE_URL_CI`
+El secret se copió con un error en el hostname, distinto al de
+`DATABASE_URL_ADMIN_CI`. Los pasos previos (psql como admin) pasaban; los
+tests con asyncpg fallaban con `socket.gaierror: [Errno -2] Name or service
+not known`. Coste: 2 runs en rojo + el tiempo de diagnosticar a ciegas.
+
+**Mitigación adoptada:** step "Diagnóstico de conectividad" que:
+1. Parsea ambos DSNs e imprime `scheme/host/port/user/db` (sin password).
+2. Hace un `psql "$APP_URL" -c 'SELECT current_user, current_database();'`
+   antes de pytest, así un secret roto falla con mensaje claro en lugar
+   de gaierror enterrado en stack trace de asyncpg.
+
+**Mejora pendiente:** validar el formato del DSN en el propio step y abortar
+si `hostname is None` o `scheme not in {postgres, postgresql}` antes de
+intentar conectar. Esto sería instantáneo y aún más claro. Cuando lo
+implementemos:
+
+```python
+# python en el step, antes del psql:
+u = urlparse(os.environ["APP_URL"])
+assert u.hostname, "APP_URL sin hostname — revisa el secret"
+assert u.scheme in ("postgres", "postgresql"), f"scheme inesperado: {u.scheme}"
+assert u.port, "APP_URL sin puerto"
+```
+
+### `astral-sh/setup-uv@v3` obsoleto
+La action moderna espera al menos `@v5`. Con `@v3` el job moría en ~7 s
+en el setup de uv sin mensaje útil (artefactos caducados en el release).
+Lección: pinear versiones específicas (`@v5.x`) sí, pero **no** quedarse en
+versiones major antiguas de actions populares — revisar al inicio de cada
+fase nueva. Para `setup-uv` el changelog está en
+`github.com/astral-sh/setup-uv/releases`.
+
+### Lint en CI fue el primer cuello de botella tras los DNS
+`ruff check src tests` falló por UP045 (`Optional[X]` → `X | None`) y
+SIM117 (`async with a: async with b:` → `async with a, b:`) en
+`api/src/db/pool.py`. Lección: correr `make lint` en local antes de
+push de cambios grandes. El pre-commit hook con ruff lo evitará — sumar
+en la próxima fase.
