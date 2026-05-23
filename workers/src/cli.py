@@ -53,7 +53,7 @@ async def _resolver_medio(dsn: str, slug: str) -> UUID | None:
 
 
 def _build_detector(
-    nombre: str, conn: asyncpg.Connection
+    nombre: str, pool: asyncpg.Pool
 ) -> Any:
     if nombre == "rss":
         return RSSDetector()
@@ -62,11 +62,15 @@ def _build_detector(
     if nombre == "gdelt":
         return GDELTDetector()
     if nombre == "x":
-        return XApiDetector(conn=conn)
+        # X API necesita pool para acquirir conexión dedicada para budget
+        # ops fuera de la transacción del runner. Ver docs/runbooks/budget.md.
+        return XApiDetector(pool=pool)
     raise ValueError(f"detector desconocido: {nombre}")
 
 
 async def cmd_detect(args: argparse.Namespace) -> int:
+    from src.trends.persistence import get_pool
+
     dsn = os.environ["DATABASE_URL"]
     medio_id = await _resolver_medio(dsn, args.medio_slug)
     if medio_id is None:
@@ -75,6 +79,7 @@ async def cmd_detect(args: argparse.Namespace) -> int:
         logger.info("medio_no_onboardado_skip", medio=args.medio_slug)
         return 0
     embeddings: EmbeddingsClient = VoyageEmbeddings()
+    pool = await get_pool(dsn)
 
     async with tenant_connection(dsn, medio_id) as conn:
         filtros = ["medio_id = $1", "activo = TRUE"]
@@ -92,7 +97,7 @@ async def cmd_detect(args: argparse.Namespace) -> int:
             return 0
 
         for f in fuentes:
-            det = _build_detector(f["detector"], conn)
+            det = _build_detector(f["detector"], pool)
             resultado = await ejecutar_fuente(conn, f["id"], det, embeddings)
             logger.info(
                 "fuente_ejecutada",

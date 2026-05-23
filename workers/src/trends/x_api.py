@@ -34,18 +34,18 @@ SERVICIO = "x_api"
 
 
 class XApiDetector:
-    """Necesita una conexión a BD para reservar budget — el detector base es
-    "pure", pero éste es la excepción documentada porque el contrato del
-    budget es atómico.
-
-    Se pasa el ``conn`` en el constructor para mantener la firma del Protocol
-    en ``detectar``.
+    """Necesita acceso a BD para reservar budget. La reserva se hace en una
+    conexión dedicada (autocommit) del pool, **fuera** de la transacción que
+    orquesta los inserts de señales en el runner. Razón: si la transacción
+    exterior hace rollback, la llamada HTTP ya ha gastado dinero real y el
+    contador del budget debe persistir. Ver docs/runbooks/budget.md
+    §"Aislamiento transaccional".
     """
 
     nombre = "x"
 
-    def __init__(self, conn: asyncpg.Connection, bearer_token: str | None = None) -> None:
-        self._conn = conn
+    def __init__(self, pool: asyncpg.Pool, bearer_token: str | None = None) -> None:
+        self._pool = pool
         self._bearer = bearer_token or os.environ.get("X_API_BEARER", "")
 
     async def detectar(self, ctx: DetectorContext) -> list[SenalCruda]:
@@ -63,45 +63,56 @@ class XApiDetector:
         )
         max_results = max(10, min(int(ctx.config.get("max_results", 15)), 100))
 
-        try:
-            reserva = await reservar(
-                self._conn, ctx.medio_id, SERVICIO, X_READ_COST_EUR
+        # Conexión dedicada, sin envolver en transaction(). Cada statement se
+        # auto-commitea, así la reserva del budget sobrevive a un rollback en
+        # la transacción del runner.
+        async with self._pool.acquire() as budget_conn:
+            # presupuestos_api tiene FORCE RLS → necesitamos contexto
+            await budget_conn.execute(
+                "SELECT set_config('app.medio_actual', $1, false)",
+                str(ctx.medio_id),
             )
-        except BudgetExceededError as err:
-            logger.warning(
-                "x_api_budget_bloquea",
-                medio_id=str(ctx.medio_id),
-                razon=str(err),
-            )
-            return []
-
-        try:
-            params = {
-                "query": query,
-                "max_results": str(max_results),
-                "tweet.fields": "public_metrics,created_at,lang",
-            }
-            headers = {"Authorization": f"Bearer {self._bearer}"}
-            async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
-                resp = await client.get(BASE_URL, params=params, headers=headers)
-            if resp.status_code == 429:
-                # rate limited: liberamos lo reservado y salimos
-                await liberar(self._conn, reserva.presupuesto_id, X_READ_COST_EUR)
-                logger.warning("x_api_429", medio_id=str(ctx.medio_id))
-                return []
-            if resp.status_code >= 400:
-                await liberar(self._conn, reserva.presupuesto_id, X_READ_COST_EUR)
+            try:
+                reserva = await reservar(
+                    budget_conn, ctx.medio_id, SERVICIO, X_READ_COST_EUR
+                )
+            except BudgetExceededError as err:
                 logger.warning(
-                    "x_api_error",
-                    status=resp.status_code,
-                    body=resp.text[:200],
+                    "x_api_budget_bloquea",
+                    medio_id=str(ctx.medio_id),
+                    razon=str(err),
                 )
                 return []
-            data: dict[str, Any] = resp.json()
-        except Exception:
-            await liberar(self._conn, reserva.presupuesto_id, X_READ_COST_EUR)
-            raise
 
+            data: dict[str, Any] | None = None
+            try:
+                params = {
+                    "query": query,
+                    "max_results": str(max_results),
+                    "tweet.fields": "public_metrics,created_at,lang",
+                }
+                headers = {"Authorization": f"Bearer {self._bearer}"}
+                async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
+                    resp = await client.get(BASE_URL, params=params, headers=headers)
+                if resp.status_code == 429:
+                    await liberar(budget_conn, reserva.presupuesto_id, X_READ_COST_EUR)
+                    logger.warning("x_api_429", medio_id=str(ctx.medio_id))
+                    return []
+                if resp.status_code >= 400:
+                    await liberar(budget_conn, reserva.presupuesto_id, X_READ_COST_EUR)
+                    logger.warning(
+                        "x_api_error",
+                        status=resp.status_code,
+                        body=resp.text[:200],
+                    )
+                    return []
+                data = resp.json()
+            except Exception:
+                await liberar(budget_conn, reserva.presupuesto_id, X_READ_COST_EUR)
+                raise
+
+        # Conexión budget liberada al pool. La reserva ya está persistida.
+        assert data is not None
         tweets: list[dict[str, Any]] = data.get("data", []) or []
         senales: list[SenalCruda] = []
         for tw in tweets:

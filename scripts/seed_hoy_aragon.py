@@ -66,6 +66,26 @@ PERFILES = [
                 "usar_solo_como_senal": True,
             },
             {
+                # Google News RSS — Google trata "gnews" como un feed RSS más,
+                # no detector separado. Ver docs/agents/trend_detector.md
+                # §"Decisión: gnews como fuente RSS".
+                "detector": "rss",
+                "origen_url": (
+                    "https://news.google.com/rss/search"
+                    "?q=Arag%C3%B3n+pol%C3%ADtica+OR+Az%C3%B3n+OR+DGA"
+                    "&hl=es&gl=ES&ceid=ES:es"
+                ),
+                "cron_expr": "*/15 * * * *",
+                "config": {
+                    "feeds": [
+                        "https://news.google.com/rss/search"
+                        "?q=Arag%C3%B3n+pol%C3%ADtica+OR+Az%C3%B3n+OR+DGA"
+                        "&hl=es&gl=ES&ceid=ES:es"
+                    ]
+                },
+                "usar_solo_como_senal": False,
+            },
+            {
                 "detector": "gtrends",
                 "origen_url": None,
                 "cron_expr": "*/30 * * * *",
@@ -164,11 +184,25 @@ async def main() -> int:
                 )
                 print(f"  perfil {p['nombre']}: {perfil_id}")
 
-                # Borrar fuentes previas del perfil (idempotencia simple) y reinsertar
-                await conn.execute(
-                    "DELETE FROM fuentes_configuradas WHERE perfil_id = $1", perfil_id
-                )
+                # Upsert por clave natural (perfil_id, detector, origen_url).
+                # Conserva el UUID y ultima_ejec_at de fuentes ya existentes.
+                # Re-ejecutar añade SOLO las nuevas. Si quieres modificar
+                # cron_expr o config de una existente, edita en BD a mano.
+                insertadas = 0
                 for f in p["fuentes"]:
+                    ya_existe = await conn.fetchval(
+                        """
+                        SELECT 1 FROM fuentes_configuradas
+                         WHERE perfil_id = $1
+                           AND detector = $2
+                           AND origen_url IS NOT DISTINCT FROM $3
+                        """,
+                        perfil_id,
+                        f["detector"],
+                        f["origen_url"],
+                    )
+                    if ya_existe:
+                        continue
                     await conn.execute(
                         """
                         INSERT INTO fuentes_configuradas (
@@ -185,7 +219,8 @@ async def main() -> int:
                         json.dumps(f["config"]),
                         f["usar_solo_como_senal"],
                     )
-                print(f"  fuentes: {len(p['fuentes'])}")
+                    insertadas += 1
+                print(f"  fuentes nuevas: {insertadas} (definidas: {len(p['fuentes'])})")
     finally:
         await conn.close()
     return 0

@@ -61,6 +61,51 @@ no tenerlo en BD en Fase 2:
    `hard_stop_fraccion NUMERIC` a `presupuestos_api` y cambiamos `reservar`
    para leerla con fallback a 0.95. Migración trivial.
 
+## Aislamiento transaccional
+
+**Importante:** la reserva del budget se hace en una **conexión dedicada
+del pool**, NO en la conexión que el runner usa para insertar señales.
+
+### Por qué
+
+`workers/src/cli.py` invoca al runner dentro de
+`tenant_connection(dsn, medio_id)`, que envuelve toda la ejecución en
+`async with conn.transaction():`. Eso significa que si el `insertar_senal`
+de alguna señal falla (constraint violation, RLS, etc.), la transacción
+exterior hace rollback de TODO — incluida una eventual reserva de budget
+que hubiéramos hecho en esa misma conexión.
+
+El problema: la llamada HTTP a X API **ya ha ocurrido** (dinero gastado),
+pero el contador del budget se "revierte" silenciosamente. La próxima
+reserva vería el contador desactualizado y la API podría gastarse más
+allá del cap real.
+
+### Cómo se aísla
+
+`XApiDetector.__init__` recibe un `asyncpg.Pool` en lugar de un `conn`.
+Cada `detectar()` acquire su propia conexión del pool:
+
+```python
+async with self._pool.acquire() as budget_conn:
+    await budget_conn.execute(
+        "SELECT set_config('app.medio_actual', $1, false)", str(ctx.medio_id)
+    )
+    reserva = await reservar(budget_conn, ...)
+    # ... HTTP call ...
+    # En caso de error: await liberar(budget_conn, ...)
+```
+
+`budget_conn` no está en transacción (modo autocommit por statement).
+`UPDATE … RETURNING` persiste inmediatamente. Cuando el runner haga
+rollback de su propia transacción, no afecta a `budget_conn`.
+
+### Test que lo verifica
+
+`workers/tests/trends/test_x_api.py::test_x_api_budget_persiste_pese_a_rollback_externo`
+abre una transacción exterior, hace una reserva desde una conexión dedicada
+del pool dentro de ese contexto, hace `tx.rollback()`, y verifica con otra
+conexión que el gasto persiste (no es 0).
+
 ## Dónde se invoca
 
 | Llamada | Archivo:línea | Coste estimado |

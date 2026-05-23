@@ -31,10 +31,45 @@ DetectorContext  ──►  TrendDetector.detectar()  ──►  [SenalCruda]
 
 | Detector | Estado | Notas |
 |---|---|---|
-| **RSS** (`rss.py`) | Funcional | Parser propio (sin feedparser para reducir deps). RSS 2.0 + Atom. Tolerante a feeds rotos. |
+| **RSS** (`rss.py`) | Funcional | Parser propio (sin feedparser para reducir deps). RSS 2.0 + Atom. Tolerante a feeds rotos. Cubre también Google News (ver §Decisión abajo). |
 | **Google Trends** (`gtrends.py`) | Funcional | Endpoint público sin clave. Mezcla configurable de geos con pesos (ES-AR vs ES). |
 | **GDELT** (`gdelt.py`) | Funcional | DOC API v2. Sin clave, rate limits razonables. |
-| **X API** (`x_api.py`) | Funcional con budget hard-cap | Necesita `X_API_BEARER` + entrada en `presupuestos_api`. Sin bearer hace skip silencioso. |
+| **X API** (`x_api.py`) | Funcional con budget hard-cap | Necesita `X_API_BEARER` + entrada en `presupuestos_api`. Sin bearer hace skip silencioso. Usa conexión dedicada del pool para que la reserva de budget sobreviva a rollbacks de la transacción del runner. |
+
+### Decisión: gnews como fuente RSS, no detector separado
+
+Google News expone búsquedas como feeds RSS estándar:
+
+```
+https://news.google.com/rss/search?q=<query>&hl=es&gl=ES&ceid=ES:es
+```
+
+No hay clave de API, ni rate limits agresivos, ni formato exótico. El parser
+RSS 2.0 que ya tenemos en `rss.py` lo consume sin modificaciones.
+
+**Por eso no hay un detector `gnews` separado.** Sería duplicar `rss.py` con
+otro nombre. Si en el futuro alguien pregunta "¿dónde está el detector de
+Google News?" la respuesta es: en `fuentes_configuradas` con
+`detector='rss'` y la URL de Google News en `config.feeds[]` (o en
+`origen_url`).
+
+Ejemplo en producción (ver `scripts/seed_hoy_aragon.py`):
+
+```python
+{
+    "detector": "rss",
+    "origen_url": "https://news.google.com/rss/search?q=...&hl=es&gl=ES&ceid=ES:es",
+    "cron_expr": "*/15 * * * *",
+    "config": {"feeds": ["https://news.google.com/rss/search?..."]},
+    "usar_solo_como_senal": False,
+}
+```
+
+Una query Google News distinta = otra fila en `fuentes_configuradas`, no
+otro detector. Esto evita explosión de detectores cuando solo cambia la URL.
+
+Si alguna vez Google cambia el formato y ya no es RSS estándar, entonces sí
+toca crear `gnews.py` como detector dedicado.
 
 ### Decisión: dedupe semántico vs clustering
 
