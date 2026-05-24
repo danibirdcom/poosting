@@ -4,15 +4,20 @@ Fase 3 sólo soporta modo ``bandeja``: inserta en ``drafts`` con
 ``estado='borrador'`` (o ``rechazado`` si los nodos previos abortaron) y
 devuelve la URL del editor. NO publica al CMS — eso es Fase 5.
 
-Operaciones (en orden, mismo connection acquire pero distintos statements;
-no transaccional para no bloquear: cada paso es idempotente vía PKs):
+Operaciones (todas dentro de ``async with conn.transaction()``: si una
+falla, rollback completo — no queremos drafts huérfanos ni imágenes sin
+draft asociado):
 
 1. INSERT en ``drafts`` (trigger sincroniza ``senal_id`` desde ``runs``).
 2. Si ``imagen_destacada`` viene de enrich: INSERT en ``imagenes_articulo`` +
    UPDATE ``drafts.imagen_destacada_id`` con el id de la imagen.
 3. INSERT en ``draft_entidades`` para cada entidad con ``catalogo_id`` (skip
    las no mapeadas).
-4. UPDATE ``runs`` a 'completado' (o 'fallido' si fue rechazado).
+4. UPDATE ``runs`` a 'completado'.
+
+El ``SET app.medio_actual`` se hace ANTES de abrir la transacción (es un
+setting de sesión, no de transacción — válido tanto dentro como fuera, pero
+fuera es más explícito y evita confusión).
 
 El estado final incluye ``draft_id``, ``imagen_destacada_id`` y la URL del
 editor.
@@ -62,50 +67,58 @@ async def publish_node(state: PipelineState, deps: PipelineDeps) -> PipelineStat
 
     imagen_destacada_id: UUID | None = None
     async with deps.pool.acquire() as conn:
+        # SET de sesión, ANTES de la transacción (válido en ambos sitios,
+        # fuera es más explícito).
         await conn.execute(
             "SELECT set_config('app.medio_actual', $1, false)", str(medio_id)
         )
-        draft_id = await insertar_draft(
-            conn,
-            run_id=run_id,
-            medio_id=medio_id,
-            titulo=state.get("titulo", ""),
-            meta_title=state.get("meta_title"),
-            meta_descr=state.get("meta_descr"),
-            slug=state.get("slug"),
-            cuerpo_md=state.get("cuerpo_md", ""),
-            entidades=list(state.get("entidades", [])),
-            enlaces_internos=list(state.get("enlaces_internos", [])),
-            schema_jsonld=dict(state.get("schema_jsonld", {})),
-            estado=estado_draft,
-        )
-
-        # Imagen destacada (si enrich la trajo).
-        imagen = state.get("imagen_destacada")
-        if isinstance(imagen, dict) and imagen.get("url"):
-            imagen_destacada_id = await _insertar_imagen(
-                conn, draft_id=draft_id, medio_id=medio_id, imagen=imagen
+        # Atomicidad: si cualquiera de los pasos lanza, rollback y el draft
+        # NO queda persistido a medias. Las FKs (drafts.run_id, imagen.draft_id,
+        # draft_entidades.draft_id) hacen el rollback consistente.
+        async with conn.transaction():
+            draft_id = await insertar_draft(
+                conn,
+                run_id=run_id,
+                medio_id=medio_id,
+                titulo=state.get("titulo", ""),
+                meta_title=state.get("meta_title"),
+                meta_descr=state.get("meta_descr"),
+                slug=state.get("slug"),
+                cuerpo_md=state.get("cuerpo_md", ""),
+                entidades=list(state.get("entidades", [])),
+                enlaces_internos=list(state.get("enlaces_internos", [])),
+                schema_jsonld=dict(state.get("schema_jsonld", {})),
+                estado=estado_draft,
             )
+
+            # Imagen destacada (si enrich la trajo).
+            imagen = state.get("imagen_destacada")
+            if isinstance(imagen, dict) and imagen.get("url"):
+                imagen_destacada_id = await _insertar_imagen(
+                    conn, draft_id=draft_id, medio_id=medio_id, imagen=imagen
+                )
+                await conn.execute(
+                    "UPDATE drafts SET imagen_destacada_id = $1 WHERE id = $2",
+                    imagen_destacada_id,
+                    draft_id,
+                )
+
+            # draft_entidades para cada entidad con catalogo_id mapeado.
+            await _insertar_draft_entidades(
+                conn,
+                draft_id=draft_id,
+                medio_id=medio_id,
+                entidades=list(state.get("entidades", [])),
+            )
+
+            # Marcar el run como completado dentro de la misma transacción
+            # — así la consistencia "draft existe ⇔ run.estado=completado"
+            # queda garantizada.
             await conn.execute(
-                "UPDATE drafts SET imagen_destacada_id = $1 WHERE id = $2",
-                imagen_destacada_id,
-                draft_id,
+                "UPDATE runs SET estado = 'completado', finalizado_at = NOW() "
+                "WHERE id = $1",
+                run_id,
             )
-
-        # draft_entidades para cada entidad con catalogo_id mapeado.
-        await _insertar_draft_entidades(
-            conn,
-            draft_id=draft_id,
-            medio_id=medio_id,
-            entidades=list(state.get("entidades", [])),
-        )
-
-        # Marcar el run como completado.
-        await conn.execute(
-            "UPDATE runs SET estado = 'completado', finalizado_at = NOW() "
-            "WHERE id = $1",
-            run_id,
-        )
 
     editor_url = EDITOR_URL_TEMPLATE.format(draft_id=draft_id)
     logger.info(

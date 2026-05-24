@@ -105,7 +105,9 @@ async def review_node(state: PipelineState, deps: PipelineDeps) -> PipelineState
     errores.extend(_checks_estructura(titulo, meta_title, meta_descr, slug, cuerpo))
     errores.extend(_checks_longitud(cuerpo, min_w, max_w))
     errores.extend(_checks_markdown(cuerpo))
-    errores.extend(_checks_citas(cuerpo, state))
+    err_citas, sug_citas = _checks_citas(cuerpo, state)
+    errores.extend(err_citas)
+    sugerencias.extend(sug_citas)
 
     # LLM check (factual + estilo).
     style_guide_md = await _cargar_style_guide(state, deps)
@@ -200,12 +202,18 @@ def _checks_markdown(cuerpo: str) -> list[str]:
     return out
 
 
-def _checks_citas(cuerpo: str, state: PipelineState) -> list[str]:
+def _checks_citas(
+    cuerpo: str, state: PipelineState
+) -> tuple[list[str], list[str]]:
     """≥2 citas inline a URLs únicas, todas presentes en state.fuentes.
 
-    Las URLs técnicas de twitter/x.com NO deben citarse (regla de write).
+    Devuelve ``(errores_bloqueantes, sugerencias)``. URLs técnicas de
+    twitter/x.com NO bloquean el draft (sugerencia, no error) — es un
+    problema cosmético que no justifica disparar requiere_revision_humana
+    cuando el resto del draft está correcto.
     """
-    out: list[str] = []
+    errores: list[str] = []
+    sugerencias: list[str] = []
     urls_cuerpo = set(re.findall(r"https?://[^\s)\]]+", cuerpo))
     urls_fuentes = {
         (f.get("url") or "").rstrip("/") for f in state.get("fuentes", []) if f.get("url")
@@ -217,25 +225,25 @@ def _checks_citas(cuerpo: str, state: PipelineState) -> list[str]:
         u for u in fantasma if "twitter.com" not in u and "x.com" not in u
     }
     if fantasma_no_twitter:
-        out.append(
+        errores.append(
             f"urls citadas no están en fuentes: {sorted(fantasma_no_twitter)[:3]}"
         )
 
     urls_x = {u for u in urls_cuerpo if "twitter.com" in u or "x.com" in u}
     if urls_x:
-        out.append(
+        sugerencias.append(
             "el cuerpo cita URLs técnicas de X/Twitter; refiérete a ellas como "
             "'una publicación en X' (no la URL)"
         )
 
     citas_validas = (urls_cuerpo_norm & urls_fuentes)
     if len(citas_validas) < MIN_CITAS_INLINE:
-        out.append(
+        errores.append(
             f"solo {len(citas_validas)} citas inline a fuentes; "
             f"se requieren ≥{MIN_CITAS_INLINE}"
         )
 
-    return out
+    return errores, sugerencias
 
 
 # ---------------------------------------------------------------------------
