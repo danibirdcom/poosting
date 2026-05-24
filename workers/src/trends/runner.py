@@ -6,7 +6,19 @@ Para una ``fuente_configurada`` dada:
 3. Para cada ``SenalCruda``: embedding → dedupe → score → upsert.
 4. Marca el estado de la ejecución en ``fuentes_configuradas``.
 
-No conoce las APIs externas — sólo orquesta.
+**Aislamiento transaccional por fuente:**
+
+Cada llamada a ``ejecutar_fuente`` adquiere su propia conexión del pool y
+envuelve los inserts en una transacción local. Si una fuente falla, su
+transacción rolling back **sin afectar a las fuentes previas o
+posteriores**. El estado (`ok` / `error` / `sin_resultados`) se persiste
+en una conexión separada para que sobreviva al rollback del trabajo.
+
+El bug que motivó este diseño: en el primer run real (PR #3 pre-merge),
+las señales de Heraldo+El Periódico+X (34 total) se perdieron porque
+Voyage devolvió 429 en una fuente posterior, lo que propagó la excepción
+hasta el ``async with conn.transaction()`` del CLI y disparó rollback
+global. Ahora cada fuente vive en su propio mundo.
 """
 
 from __future__ import annotations
@@ -38,111 +50,142 @@ class EjecucionResultado:
     n_detectadas: int
     n_insertadas: int
     n_actualizadas: int
-    estado: str          # 'ok' | 'sin_resultados' | 'error'
+    estado: str          # 'ok' | 'sin_resultados' | 'error' | 'no_existe'
 
 
 async def ejecutar_fuente(
-    conn: asyncpg.Connection,
+    pool: asyncpg.Pool,
+    medio_id: UUID,
     fuente_id: UUID,
     detector: TrendDetector,
     embeddings: EmbeddingsClient,
 ) -> EjecucionResultado:
-    """Ejecuta el detector para una fuente concreta y persiste sus señales."""
-    fuente = await conn.fetchrow(
-        """
-        SELECT f.id, f.medio_id, f.perfil_id, f.detector, f.config,
-               f.usar_solo_como_senal,
-               p.pais, p.idiomas, p.keywords_obligatorias, p.keywords_negativas,
-               p.categoria_destino
-          FROM fuentes_configuradas f
-          JOIN perfiles_deteccion p ON p.id = f.perfil_id
-         WHERE f.id = $1 AND f.activo = TRUE AND p.activo = TRUE
-        """,
-        fuente_id,
-    )
-    if fuente is None:
-        logger.warning("fuente_no_encontrada", fuente_id=str(fuente_id))
-        return EjecucionResultado(fuente_id, 0, 0, 0, "no_existe")
+    """Ejecuta el detector para una fuente concreta, aislando su transacción.
 
-    ctx = DetectorContext(
-        medio_id=fuente["medio_id"],
-        perfil_id=fuente["perfil_id"],
-        fuente_id=fuente["id"],
-        categoria_destino=fuente["categoria_destino"],
-        pais=fuente["pais"],
-        idiomas=tuple(fuente["idiomas"]),
-        keywords_obligatorias=tuple(fuente["keywords_obligatorias"]),
-        keywords_negativas=tuple(fuente["keywords_negativas"]),
-        config=fuente["config"] or {},
-        usar_solo_como_senal=fuente["usar_solo_como_senal"],
-    )
-
-    try:
-        senales_crudas = await detector.detectar(ctx)
-    except Exception as err:
-        logger.exception("detector_error", fuente_id=str(fuente_id), error=str(err))
-        await marcar_ejecucion_fuente(conn, fuente_id, "error")
-        return EjecucionResultado(fuente_id, 0, 0, 0, "error")
-
-    if not senales_crudas:
-        await marcar_ejecucion_fuente(conn, fuente_id, "sin_resultados")
-        return EjecucionResultado(fuente_id, 0, 0, 0, "sin_resultados")
-
-    pesos = await _cargar_pesos(conn, ctx.medio_id, ctx.categoria_destino)
+    Cualquier excepción que escape del detector o del cliente de embeddings
+    se loggea con traza completa, la transacción de inserts rolling back,
+    y la fuente queda marcada como ``error`` en una conn separada — pero
+    el bucle del CLI puede seguir con la siguiente fuente.
+    """
+    estado = "error"
+    n_detectadas = 0
     n_insert = 0
     n_update = 0
 
-    textos = [s.termino for s in senales_crudas]
-    vectores = await embeddings.embed(textos)
-
-    now_unix = time.time()
-    for senal, vec in zip(senales_crudas, vectores, strict=True):
-        freshness_h = calcular_freshness_horas(now_unix, now_unix)  # detectada ahora
-        multiplicador = _peso_region(senal, ctx)
-        score = score_compuesto(
-            velocidad=senal.velocidad,
-            volumen=senal.volumen,
-            freshness_horas=freshness_h,
-            intent=None,
-            pesos=pesos,
-            multiplicador_region=multiplicador,
-        )
-
-        similar = await buscar_similar(conn, ctx.medio_id, vec)
-        if similar is not None:
-            await actualizar_similar(
-                conn,
-                senal_id=similar.id,
-                nuevo_score=score,
-                nuevo_volumen=senal.volumen,
-                extender_horas=senal.expira_en_horas,
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "SELECT set_config('app.medio_actual', $1, false)", str(medio_id)
             )
-            n_update += 1
-            continue
 
-        await insertar_senal(
-            conn,
-            medio_id=ctx.medio_id,
-            perfil_id=ctx.perfil_id,
-            fuente_id=ctx.fuente_id,
-            origen=senal.origen,
-            termino=senal.termino,
-            categoria=senal.categoria,
-            pais=senal.pais,
-            region=senal.region,
-            score=score,
-            velocidad=senal.velocidad,
-            volumen=senal.volumen,
-            url_origen=senal.url_origen,
-            paywall=senal.paywall,
-            expira_en_horas=senal.expira_en_horas,
-            embedding=vec,
-            metadatos=senal.metadatos,
+            fuente = await conn.fetchrow(
+                """
+                SELECT f.id, f.medio_id, f.perfil_id, f.detector, f.config,
+                       f.usar_solo_como_senal,
+                       p.pais, p.idiomas, p.keywords_obligatorias,
+                       p.keywords_negativas, p.categoria_destino
+                  FROM fuentes_configuradas f
+                  JOIN perfiles_deteccion p ON p.id = f.perfil_id
+                 WHERE f.id = $1 AND f.activo = TRUE AND p.activo = TRUE
+                """,
+                fuente_id,
+            )
+            if fuente is None:
+                logger.warning("fuente_no_encontrada", fuente_id=str(fuente_id))
+                return EjecucionResultado(fuente_id, 0, 0, 0, "no_existe")
+
+            ctx = DetectorContext(
+                medio_id=fuente["medio_id"],
+                perfil_id=fuente["perfil_id"],
+                fuente_id=fuente["id"],
+                categoria_destino=fuente["categoria_destino"],
+                pais=fuente["pais"],
+                idiomas=tuple(fuente["idiomas"]),
+                keywords_obligatorias=tuple(fuente["keywords_obligatorias"]),
+                keywords_negativas=tuple(fuente["keywords_negativas"]),
+                config=fuente["config"] or {},
+                usar_solo_como_senal=fuente["usar_solo_como_senal"],
+            )
+
+            senales_crudas = await detector.detectar(ctx)
+            n_detectadas = len(senales_crudas)
+
+            if not senales_crudas:
+                estado = "sin_resultados"
+                return EjecucionResultado(fuente_id, 0, 0, 0, "sin_resultados")
+
+            pesos = await _cargar_pesos(conn, ctx.medio_id, ctx.categoria_destino)
+            textos = [s.termino for s in senales_crudas]
+            vectores = await embeddings.embed(textos)
+
+            # Inserts de señales en transacción local. Si algo dentro lanza,
+            # rollback solo de esta fuente; el resto del pipeline sigue.
+            async with conn.transaction():
+                now_unix = time.time()
+                for senal, vec in zip(senales_crudas, vectores, strict=True):
+                    freshness_h = calcular_freshness_horas(now_unix, now_unix)
+                    multiplicador = _peso_region(senal, ctx)
+                    score = score_compuesto(
+                        velocidad=senal.velocidad,
+                        volumen=senal.volumen,
+                        freshness_horas=freshness_h,
+                        intent=None,
+                        pesos=pesos,
+                        multiplicador_region=multiplicador,
+                    )
+
+                    similar = await buscar_similar(conn, ctx.medio_id, vec)
+                    if similar is not None:
+                        await actualizar_similar(
+                            conn,
+                            senal_id=similar.id,
+                            nuevo_score=score,
+                            nuevo_volumen=senal.volumen,
+                            extender_horas=senal.expira_en_horas,
+                        )
+                        n_update += 1
+                        continue
+
+                    await insertar_senal(
+                        conn,
+                        medio_id=ctx.medio_id,
+                        perfil_id=ctx.perfil_id,
+                        fuente_id=ctx.fuente_id,
+                        origen=senal.origen,
+                        termino=senal.termino,
+                        categoria=senal.categoria,
+                        pais=senal.pais,
+                        region=senal.region,
+                        score=score,
+                        velocidad=senal.velocidad,
+                        volumen=senal.volumen,
+                        url_origen=senal.url_origen,
+                        paywall=senal.paywall,
+                        expira_en_horas=senal.expira_en_horas,
+                        embedding=vec,
+                        metadatos=senal.metadatos,
+                    )
+                    n_insert += 1
+
+            estado = "ok"
+    except Exception:
+        logger.exception(
+            "ejecutar_fuente_excepcion", fuente_id=str(fuente_id), medio_id=str(medio_id)
         )
-        n_insert += 1
+        estado = "error"
 
-    await marcar_ejecucion_fuente(conn, fuente_id, "ok")
-    return EjecucionResultado(fuente_id, len(senales_crudas), n_insert, n_update, "ok")
+    # Marcar estado en una conn SEPARADA. Si la principal hizo rollback,
+    # el marcado de "error" no se debe perder con ella.
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "SELECT set_config('app.medio_actual', $1, false)", str(medio_id)
+            )
+            await marcar_ejecucion_fuente(conn, fuente_id, estado)
+    except Exception:
+        logger.exception("marcar_ejecucion_fallo", fuente_id=str(fuente_id))
+
+    return EjecucionResultado(fuente_id, n_detectadas, n_insert, n_update, estado)
 
 
 async def _cargar_pesos(
@@ -165,7 +208,7 @@ async def _cargar_pesos(
 
 
 def _peso_region(senal: SenalCruda, ctx: DetectorContext) -> float:
-    """Para GTrends con mezcla ES-AR/ES, el config trae el peso por geo."""
+    """Para GTrends con mezcla de geos, el config trae el peso por geo."""
     if senal.origen != "gtrends":
         return 1.0
     geos: list[dict[str, Any]] = ctx.config.get("geos") or []

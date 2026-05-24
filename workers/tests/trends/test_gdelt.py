@@ -66,11 +66,66 @@ async def test_gdelt_parsea_articles(monkeypatch) -> None:
     assert senales[0].region == "Spain"
 
 
+@pytest.fixture
+def _instant_retries(monkeypatch):
+    """Evita que tenacity duerma de verdad entre reintentos."""
+    import asyncio
+
+    async def _no_sleep(_secs: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+
 @pytest.mark.asyncio
-async def test_gdelt_devuelve_vacio_si_5xx(monkeypatch) -> None:
+async def test_gdelt_devuelve_vacio_si_5xx_persistente(monkeypatch, _instant_retries) -> None:
+    """Tras 3 intentos en 503, devuelve [] en vez de propagar."""
+    intentos: list[int] = []
+
     async def fake_get(self, url, params=None):
-        req = httpx.Request("GET", url)
-        return httpx.Response(503, text="upstream down", request=req)
+        intentos.append(1)
+        return httpx.Response(503, text="upstream down", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+    senales = await GDELTDetector().detectar(_ctx())
+    assert senales == []
+    assert len(intentos) == 3, f"se esperaban 3 intentos por retry, hubo {len(intentos)}"
+
+
+@pytest.mark.asyncio
+async def test_gdelt_reintenta_429_y_recupera(monkeypatch, _instant_retries) -> None:
+    """429 seguido de 200 → devuelve señales sin propagar excepción."""
+    intentos: list[int] = []
+    payload_ok = {"articles": [{"url": "https://ex.com/a", "title": "OK", "domain": "ex.com"}]}
+
+    async def fake_get(self, url, params=None):
+        intentos.append(1)
+        if len(intentos) < 2:
+            return httpx.Response(429, request=httpx.Request("GET", url))
+        return httpx.Response(200, json=payload_ok, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+    senales = await GDELTDetector().detectar(_ctx())
+    assert len(senales) == 1
+    assert senales[0].termino == "OK"
+    assert len(intentos) == 2
+
+
+@pytest.mark.asyncio
+async def test_gdelt_200_pero_no_json_devuelve_vacio(monkeypatch) -> None:
+    """GDELT a veces devuelve 200 OK con HTML (interstitial/mantenimiento).
+    El detector debe tratar el JSONDecodeError como sin resultados, no lanzar.
+    """
+
+    async def fake_get(self, url, params=None):
+        return httpx.Response(
+            200,
+            text="<html><body>Service temporarily unavailable</body></html>",
+            headers={"content-type": "text/html"},
+            request=httpx.Request("GET", url),
+        )
 
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
 

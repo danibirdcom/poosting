@@ -91,9 +91,38 @@ async def test_gtrends_mezcla_geos_con_peso(monkeypatch) -> None:
 
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
 
-    ctx = _ctx_gtrends(geos=[{"geo": "ES-AR", "peso": 0.7}, {"geo": "ES", "peso": 0.3}])
+    # Mezcla a nivel país (multi-geo). ES-AR ya no se usa (404 en Google).
+    ctx = _ctx_gtrends(geos=[{"geo": "ES", "peso": 0.7}, {"geo": "FR", "peso": 0.3}])
     det = GTrendsDetector()
     senales = await det.detectar(ctx)
-    assert {"ES-AR", "ES"} == set(llamadas)
+    assert {"ES", "FR"} == set(llamadas)
     regiones = {s.region for s in senales}
-    assert regiones == {"ES-AR", "ES"}
+    assert regiones == {"ES", "FR"}
+
+
+@pytest.mark.asyncio
+async def test_gtrends_404_devuelve_vacio_no_lanza(monkeypatch) -> None:
+    """Si Google devuelve 404 (geo inválida o endpoint deprecado), el
+    detector debe loggear warning y devolver lista vacía, no lanzar."""
+
+    async def fake_get(self, url, params=None):
+        return httpx.Response(404, text="not found", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+    senales = await GTrendsDetector().detectar(_ctx_gtrends())
+    assert senales == []
+
+
+@pytest.mark.asyncio
+async def test_gtrends_429_devuelve_vacio_no_lanza(monkeypatch) -> None:
+    """429 rate limit: log warning, lista vacía. No reintentamos a este
+    nivel — un cron posterior lo capturará."""
+
+    async def fake_get(self, url, params=None):
+        return httpx.Response(429, text="rate limited", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+    senales = await GTrendsDetector().detectar(_ctx_gtrends())
+    assert senales == []

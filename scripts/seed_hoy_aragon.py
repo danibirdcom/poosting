@@ -86,14 +86,20 @@ PERFILES = [
                 "usar_solo_como_senal": False,
             },
             {
+                # GTrends: DESACTIVADO desde el seed. El endpoint
+                # dailytrends devuelve 404 persistente (verificado run #17
+                # con UA realista y geo=ES). Reactivar cuando se resuelva el
+                # endpoint (issue Fase 2.5). Ver scripts/desactivar_gtrends.py
+                # para desactivar también en entornos donde ya se sembró.
                 "detector": "gtrends",
                 "origen_url": None,
                 "cron_expr": "*/30 * * * *",
                 "config": {
-                    "geos": [{"geo": "ES-AR", "peso": 0.7}, {"geo": "ES", "peso": 0.3}],
+                    "geos": [{"geo": "ES", "peso": 1.0}],
                     "max_resultados": 20,
                 },
                 "usar_solo_como_senal": False,
+                "activo": False,
             },
             {
                 "detector": "gdelt",
@@ -219,9 +225,9 @@ async def main() -> int:
                         """
                         INSERT INTO fuentes_configuradas (
                           medio_id, perfil_id, detector, origen_url, cron_expr,
-                          config, usar_solo_como_senal
+                          config, usar_solo_como_senal, activo
                         )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                         """,
                         medio_id,
                         perfil_id,
@@ -230,6 +236,7 @@ async def main() -> int:
                         f["cron_expr"],
                         f["config"],
                         f["usar_solo_como_senal"],
+                        f.get("activo", True),
                     )
                     insertadas += 1
                 print(f"  fuentes nuevas: {insertadas} (definidas: {len(p['fuentes'])})")

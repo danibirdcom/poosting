@@ -32,9 +32,34 @@ DetectorContext  ──►  TrendDetector.detectar()  ──►  [SenalCruda]
 | Detector | Estado | Notas |
 |---|---|---|
 | **RSS** (`rss.py`) | Funcional | Parser propio (sin feedparser para reducir deps). RSS 2.0 + Atom. Tolerante a feeds rotos. Cubre también Google News (ver §Decisión abajo). |
-| **Google Trends** (`gtrends.py`) | Funcional | Endpoint público sin clave. Mezcla configurable de geos con pesos (ES-AR vs ES). |
+| **Google Trends** (`gtrends.py`) | Funcional (sólo nivel país) | Endpoint público sin clave. Mezcla configurable de geos con pesos. **No soporta granularidad de comunidad autónoma** (ES-AR devuelve 404). Ver §"Limitaciones GTrends". |
 | **GDELT** (`gdelt.py`) | Funcional | DOC API v2. Sin clave, rate limits razonables. |
 | **X API** (`x_api.py`) | Funcional con budget hard-cap | Necesita `X_API_BEARER` + entrada en `presupuestos_api`. Sin bearer hace skip silencioso. Usa conexión dedicada del pool para que la reserva de budget sobreviva a rollbacks de la transacción del runner. |
+
+### Limitaciones GTrends
+
+Tras el primer run en staging detectamos dos problemas con el endpoint
+`https://trends.google.com/trends/api/dailytrends`:
+
+1. **`geo=ES-AR` devuelve 404.** Google sólo soporta códigos ISO de país
+   (`ES`, `FR`, `GB`, etc.) en este endpoint. La idea original de pesar
+   ES-AR ×0.7 vs ES ×0.3 no se puede implementar aquí. La señal aragonesa
+   tiene que venir de los detectores RSS (Aragón Digital, EuropaPress
+   Aragón, Heraldo si paywall, …) y de Google News con queries específicas.
+
+2. **User-Agents tipo "bot" devuelven 404.** Hay que usar un UA realista
+   de navegador. Está en la constante `USER_AGENT` de `gtrends.py`.
+
+**Comportamiento ante fallos:** el detector responde con lista vacía y
+log warning si recibe 404 o 429. NO rompe el pipeline. Si los warnings
+son persistentes, el operador puede marcar la fuente `activo=FALSE`
+hasta que se investigue (Fase 2.5).
+
+**Follow-up Fase 2.5:**
+- Investigar si `pytrends` o un endpoint distinto soportan
+  `interest_by_region` con códigos sub-país (ej. `ES-AR`).
+- Si Google deprecia totalmente el endpoint `dailytrends`, migrar a la
+  alternativa que esté disponible o desactivar el detector.
 
 ### Decisión: gnews como fuente RSS, no detector separado
 

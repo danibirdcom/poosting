@@ -67,6 +67,8 @@ jobs:
       # ------------------------------------------------------------------
       - name: Detectar IP del runner y abrir SG
         id: open_sg
+        env:
+          PGURL: ${{ secrets.DATABASE_URL_ADMIN_CI }}
         run: |
           set -euo pipefail
           RUNNER_IP=$(curl -fsS https://checkip.amazonaws.com | tr -d '\n')
@@ -84,6 +86,21 @@ jobs:
             || aws ec2 describe-security-groups --group-ids "$RDS_SG_ID" \
                  --query "SecurityGroups[0].IpPermissions[?ToPort==\`5432\`]" \
                  --output table
+          # Esperar a que la regla SG propague antes de seguir. AWS suele
+          # tardar 1-10s; hubo runs en los que psql del siguiente step caía
+          # con "Connection timed out" porque arrancaba demasiado rápido.
+          # Probamos psql cada 2s, max 30s. Si no abre, abortamos con error
+          # claro (no esperamos a que un step posterior reviente).
+          echo "Esperando propagación de la regla SG..."
+          for i in $(seq 1 15); do
+            if psql "$PGURL" -c "SELECT 1" >/dev/null 2>&1; then
+              echo "BD accesible tras ${i} intentos (~$((i*2))s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "ERROR: BD no accesible en 30s tras abrir SG" >&2
+          exit 1
 
       # ------------------------------------------------------------------
       # Reset de la BD de CI. Se hace SIEMPRE al principio para que cada
