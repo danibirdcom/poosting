@@ -47,6 +47,7 @@ VALUES
   (NULL, 'evento', 'Vuelta a Aragón', ARRAY[]::TEXT[], NULL,
     'Carrera ciclista por etapas en territorio aragonés.'),
   (NULL, 'evento', 'Aragón Open Future', ARRAY[]::TEXT[], NULL,
-    'Programa de innovación y emprendimiento de Telefónica y Gobierno de Aragón.');
+    'Programa de innovación y emprendimiento de Telefónica y Gobierno de Aragón.')
+ON CONFLICT (medio_id, nombre_canonico) DO NOTHING;
 
 COMMIT;
