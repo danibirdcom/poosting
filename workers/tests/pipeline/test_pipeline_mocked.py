@@ -80,26 +80,40 @@ async def _cleanup(slug: str) -> None:
 
 
 def _draft_json(titulo: str, cuerpo: str, fuentes_urls: list[str]) -> str:
-    """JSON que un Sonnet bien comportado devolvería para el nodo write."""
-    cuerpo_con_citas = cuerpo + " Más info: " + " ".join(fuentes_urls[:1])
+    """JSON que un Sonnet bien comportado devolvería para el nodo write.
+
+    El cuerpo ya incluye ≥2 URLs (vía _cuerpo_palabras); aquí solo añadimos
+    el JSON wrapper con meta_title DISTINTO del titulo (regla review PR B).
+    """
     return json.dumps(
         {
             "titulo": titulo,
-            "meta_title": titulo[:55],
+            # meta_title: distinto del titulo (variación útil para Discover).
+            # Truncamos y añadimos sufijo informativo.
+            "meta_title": (titulo[:35] + " | análisis") if len(titulo) > 35 else (
+                titulo + " | análisis"
+            ),
             "meta_descr": META_DESCR_OK_A,
             "slug": "azcon-presupuestos-aragon-2026",
-            "cuerpo_md": cuerpo_con_citas,
+            "cuerpo_md": cuerpo,
         },
         ensure_ascii=False,
     )
 
 
-def _cuerpo_palabras(fuente_url: str, target: int = 900) -> str:
-    """Genera al menos ``target`` palabras (default 900: rango evergreen 800-1000).
+def _cuerpo_palabras(fuente_urls: str | list[str], target: int = 900) -> str:
+    """Genera ``target`` palabras (±20) con ≥2 URLs citadas inline.
 
-    detect_node con tema_input pone urgencia='evergreen' → review exige
-    800-1000 palabras. Para tests con señal+normal, pasar target=750.
+    Acepta una URL única (legacy) o lista de URLs. Si es lista, embebe las
+    2-3 primeras. Si es string, embebe esa más una URL placeholder válida
+    (los tests modernos deben pasar lista).
+
+    Rango por urgencia:
+    - breaking: 400-600 (target=500)
+    - normal: 600-900 (target=750)
+    - evergreen: 800-1000 (target=900, default)
     """
+    urls = [fuente_urls] if isinstance(fuente_urls, str) else list(fuente_urls[:3])
     parrafo = (
         "El Gobierno de Aragón ha presentado los presupuestos para 2026, "
         "con un incremento del cinco por ciento respecto al año anterior. "
@@ -111,12 +125,13 @@ def _cuerpo_palabras(fuente_url: str, target: int = 900) -> str:
     cuerpo = ""
     while len(cuerpo.split()) < target:
         cuerpo += parrafo
-    cuerpo += f"\n\nFuente: {fuente_url}"
-    # Recorta si nos pasamos del techo (1000 para evergreen).
+    sufijo_urls = "\n\n".join(f"Ver: {u}" for u in urls)
+    cuerpo += "\n\n" + sufijo_urls
     palabras = cuerpo.split()
-    if len(palabras) > 1000:
-        palabras = palabras[:980]
-        cuerpo = " ".join(palabras) + f"\n\nFuente: {fuente_url}"
+    techo = 1000 if target >= 800 else (900 if target >= 600 else 600)
+    if len(palabras) > techo:
+        palabras = palabras[: techo - 8]
+        cuerpo = " ".join(palabras) + "\n\n" + sufijo_urls
     return cuerpo
 
 
@@ -171,7 +186,7 @@ async def test_pipeline_end_to_end_dry_run_persiste_draft() -> None:
                 "persona|Jorge Azcón\norganizacion|DGA",                # research NER
                 _draft_json(
                     "Azcón presenta los presupuestos de Aragón para 2026",
-                    _cuerpo_palabras(fuente_urls[0]),
+                    _cuerpo_palabras(fuente_urls),
                     fuente_urls,
                 ),                                                       # write
                 "",                                                      # review (sin errores)
@@ -380,7 +395,7 @@ async def test_review_detecta_invencion_url_fantasma() -> None:
         ]
         url_fantasma = "https://inventado.es/no-existe"
         cuerpo_con_fantasma = (
-            _cuerpo_palabras(fuente_urls[0])
+            _cuerpo_palabras(fuente_urls)
             + f"\n\nVer también: {url_fantasma}"
         )
         deps = await _construir_deps(
