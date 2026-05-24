@@ -129,8 +129,13 @@ def test_claude_sin_api_key_lanza() -> None:
 
 
 def test_json_output_kwargs_estructura() -> None:
+    """json_output_kwargs YA NO incluye prefill — Sonnet 4.6+ lo rechaza
+    (BadRequestError "This model does not support assistant message prefill").
+    El system prompt + temperature baja basta; parse_json_tolerante limpia
+    fences si aparecen.
+    """
     kw = json_output_kwargs()
-    assert kw["prefill"] == "{"
+    assert "prefill" not in kw, "prefill rompe Sonnet 4.6+; debe estar fuera"
     assert kw["temperature"] == 0.3
     assert "JSON" in kw["system"]
     assert "markdown" in kw["system"]

@@ -23,15 +23,14 @@ Routing:
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
-from typing import Any
 
 import structlog
 from jinja2 import Template
 from pydantic import BaseModel, Field, ValidationError
 
+from src.llm._json_utils import parse_json_tolerante
 from src.llm.claude import json_output_kwargs
 from src.llm.config import CLAUDE_HAIKU_MODEL
 from src.pipeline.nodes.deps import PipelineDeps
@@ -302,7 +301,7 @@ async def _consultar_llm_revisor(
     if not raw or not raw.strip():
         return ReviewLLMOutput()
 
-    parsed = _parse_json_estricto(raw)
+    parsed = parse_json_tolerante(raw)
     if parsed is not None:
         try:
             return ReviewLLMOutput.model_validate(parsed)
@@ -310,19 +309,6 @@ async def _consultar_llm_revisor(
             logger.warning("review_llm_schema_invalido", error=str(err))
 
     return _parse_legacy(raw)
-
-
-def _parse_json_estricto(raw: str) -> dict[str, Any] | None:
-    clean = raw.strip()
-    if clean.startswith("```"):
-        clean = clean.strip("`")
-        if clean.lower().startswith("json"):
-            clean = clean[4:].lstrip()
-    try:
-        data = json.loads(clean)
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, dict) else None
 
 
 def _parse_legacy(raw: str) -> ReviewLLMOutput:
