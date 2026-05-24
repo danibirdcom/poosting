@@ -82,7 +82,9 @@ class PipelineState(TypedDict, total=False):
     # ---- enrich ----
     enlaces_internos: list[EnlaceInterno]
     schema_jsonld: dict[str, object]
-    imagen_destacada_id: UUID | None
+    open_graph: dict[str, str]
+    imagen_destacada: dict[str, object] | None    # dict completo de Pexels
+    imagen_destacada_id: UUID | None              # poblado por publish tras insert
     imagen_destacada_url: str | None
     tags_cms: list[str]
 

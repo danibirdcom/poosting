@@ -239,7 +239,7 @@ async def _sintetizar_hechos(
         "No inventes hechos no respaldados por al menos una fuente.\n\n"
         f"TEMA: {tema}\n\nFUENTES:\n{fuentes_blob}\n\nResponde SOLO el JSON."
     )
-    raw = await deps.gemini.generar(prompt, modelo=GEMINI_MODEL)
+    raw = await deps.gemini.generar(prompt, modelo=GEMINI_MODEL, grounding=True)
     if not raw or not raw.strip():
         return []
 
