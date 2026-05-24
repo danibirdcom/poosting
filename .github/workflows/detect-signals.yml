@@ -1,8 +1,7 @@
 name: Detect signals
 
-# Durante las 72h iniciales de validación manual de Fase 2: SOLO
-# workflow_dispatch. El cron queda comentado hasta confirmar volumen,
-# gasto X y feeds descubiertos. Decisión en docs/runbooks/scheduling.md.
+# Cron activo tras validación manual de Fase 2 (45 señales reales en 72h
+# sin incidencias). Histórico de decisiones en docs/runbooks/scheduling.md.
 on:
   workflow_dispatch:
     inputs:
@@ -14,12 +13,8 @@ on:
         description: "Filtrar a un detector: rss|gtrends|gdelt|x (vacío = todos)"
         required: false
         default: ""
-  # schedule:
-  #   - cron: "*/15 * * * *"
-  # ☝️ Reactivar tras 72h sin incidencias en runs manuales (validación
-  # de volumen + gasto X + feeds). Cuando se reactive, considerar bajar
-  # a "*/30" mientras quede sólo Hoy Aragón onboardeado (los otros 2
-  # medios del matrix son no-ops por ahora).
+  schedule:
+    - cron: "*/15 * * * *"
 
 concurrency:
   group: detect-signals
