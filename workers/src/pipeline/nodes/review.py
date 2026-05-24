@@ -24,7 +24,9 @@ Routing:
 from __future__ import annotations
 
 import re
+import unicodedata
 from pathlib import Path
+from urllib.parse import urlparse
 
 import structlog
 from jinja2 import Template
@@ -111,7 +113,20 @@ async def review_node(state: PipelineState, deps: PipelineDeps) -> PipelineState
     # LLM check (factual + estilo).
     style_guide_md = await _cargar_style_guide(state, deps)
     llm_resultado = await _consultar_llm_revisor(state, deps, style_guide_md)
-    errores.extend(llm_resultado.errores_factuales)
+
+    # Post-filter de errores factuales: si el error señala una mención a un
+    # medio que aparece como dominio en state.fuentes, es una atribución
+    # periodística legítima y NO debe bloquear el draft. La movemos a
+    # sugerencias por si el editor quiere mejorar la redacción, pero no
+    # cuenta como error. Defensa de código por si Haiku ignora el prompt.
+    dominios_fuentes = _extraer_dominios_fuentes(state)
+    err_factuales_filtrados: list[str] = []
+    for err in llm_resultado.errores_factuales:
+        if _es_atribucion_a_medio_fuente(err, dominios_fuentes):
+            sugerencias.append(f"(atribución a medio fuente, no bloqueante) {err}")
+        else:
+            err_factuales_filtrados.append(err)
+    errores.extend(err_factuales_filtrados)
     errores.extend(llm_resultado.errores_estilo)
     sugerencias.extend(llm_resultado.sugerencias)
 
@@ -309,6 +324,64 @@ async def _consultar_llm_revisor(
             logger.warning("review_llm_schema_invalido", error=str(err))
 
     return _parse_legacy(raw)
+
+
+# ---------------------------------------------------------------------------
+# Detección de atribuciones a medios fuente (post-filter de errores LLM)
+# ---------------------------------------------------------------------------
+def _normalizar(s: str) -> str:
+    """lowercase + sin acentos + solo alfanumérico.
+
+    "El Periódico de Aragón" → "elperiodicodearagon"
+    Permite matching robusto entre nombres humanos y slugs de dominio.
+    """
+    descompuesto = unicodedata.normalize("NFD", s)
+    sin_acentos = "".join(c for c in descompuesto if unicodedata.category(c) != "Mn")
+    return "".join(c.lower() for c in sin_acentos if c.isalnum())
+
+
+def _extraer_dominios_fuentes(state: PipelineState) -> set[str]:
+    """Devuelve set de "nicknames" de medios fuente, normalizados.
+
+    Para cada fuente con url o dominio, extrae la parte distintiva del dominio
+    (segmento antes del TLD, sin "www") y la normaliza. P. ej.:
+        https://www.elperiodicodearagon.com/x  → "elperiodicodearagon"
+        https://heraldo.es/y                   → "heraldo"
+    Nicknames de longitud < 4 se descartan (evita falsos positivos con
+    dominios cortos tipo "ok.es").
+    """
+    out: set[str] = set()
+    for f in state.get("fuentes") or []:
+        host = (f.get("dominio") or "").lower()
+        if not host:
+            url = f.get("url") or ""
+            try:
+                host = (urlparse(url).hostname or "").lower()
+            except ValueError:
+                continue
+        if not host:
+            continue
+        if host.startswith("www."):
+            host = host[4:]
+        # Tomar el primer segmento (antes del primer "."): "heraldo.es" → "heraldo".
+        nickname = host.split(".")[0]
+        if len(nickname) >= 4:
+            out.add(_normalizar(nickname))
+    return out
+
+
+def _es_atribucion_a_medio_fuente(error: str, dominios: set[str]) -> bool:
+    """True si el error señala una entidad cuyo nombre coincide con un medio
+    en ``dominios`` (set de nicknames ya normalizados).
+
+    Estrategia: normaliza el error y comprueba si algún nickname aparece como
+    substring. P. ej. error="mención a 'El Periódico de Aragón' no catalogada"
+    normalizado contiene "elperiodicodearagon" — match con nickname.
+    """
+    if not dominios:
+        return False
+    error_norm = _normalizar(error)
+    return any(nick in error_norm for nick in dominios)
 
 
 def _parse_legacy(raw: str) -> ReviewLLMOutput:

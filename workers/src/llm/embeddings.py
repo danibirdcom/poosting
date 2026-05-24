@@ -58,6 +58,10 @@ class VoyageEmbeddings:
     def __init__(self, api_key: str | None = None, timeout_s: float = 20.0) -> None:
         self._api_key = api_key or os.environ.get("VOYAGE_API_KEY", "")
         self._timeout_s = timeout_s
+        # Coherente con ClaudeReal/GeminiReal/PexelsClient: el CLI redactar
+        # y los smoke scripts leen este contador para reportar uso. Se
+        # incrementa una vez por llamada exitosa (no por reintento).
+        self.calls_total: int = 0
 
     async def embed(
         self, textos: list[str], input_type: InputType = "document"
@@ -67,7 +71,12 @@ class VoyageEmbeddings:
         if not self._api_key:
             raise RuntimeError("VOYAGE_API_KEY no configurada")
 
-        return await self._embed_with_retry(textos, input_type)
+        result = await self._embed_with_retry(textos, input_type)
+        # Solo incrementamos en éxito; si _embed_with_retry agota retries y
+        # lanza, no contamos esa llamada (no consumió cuota efectiva del
+        # endpoint, o si lo hizo, la trazabilidad del fallo va por logs).
+        self.calls_total += 1
+        return result
 
     @retry(
         stop=stop_after_attempt(3),
