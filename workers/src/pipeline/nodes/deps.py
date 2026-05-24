@@ -17,8 +17,21 @@ import asyncpg
 class LLMClient(Protocol):
     """Protocolo común para clientes de Claude / Gemini.
 
-    El test usa un mock que implementa esto. Las implementaciones reales
-    viven en ``workers/src/llm/`` y se añaden en PR B.
+    Kwargs reconocidos por el cliente real (no todos los implementa cada
+    proveedor — los desconocidos se ignoran):
+
+    - ``system`` / ``system_instruction`` (str): system prompt.
+    - ``max_tokens`` (int): cap de tokens de salida.
+    - ``temperature`` (float).
+    - ``prefill`` (str): solo Claude — prefill del mensaje assistant para
+      forzar formato (ej. ``"{"`` para JSON estricto).
+    - ``grounding`` (bool): solo Gemini — activa la tool ``google_search``
+      para que el modelo cite fuentes verificables. Usado por ``research``
+      al sintetizar hechos.
+
+    Los clientes reales (``ClaudeReal`` / ``GeminiReal``) exponen además
+    ``tokens_in_total``, ``tokens_out_total``, ``calls_total`` y un breakdown
+    ``*_por_modelo`` que el CLI ``redactar`` lee para calcular coste.
     """
 
     async def generar(self, prompt: str, modelo: str, **kwargs: object) -> str: ...
