@@ -1,11 +1,14 @@
-"""CLI entrypoint para el scheduler de GitHub Actions.
+"""CLI entrypoint para el scheduler de GitHub Actions y operaciones manuales.
+
+Subcomandos:
+    detect    Ejecuta detectores de señales para un medio (cron).
+    redactar  Lanza el pipeline multiagente (6 nodos) para una señal o tema.
 
 Uso:
     python -m src.cli detect --medio-slug hoy-aragon
     python -m src.cli detect --medio-slug hoy-aragon --detector rss
-
-Lee de BD los perfiles + fuentes activas del medio, instancia los detectores
-y ejecuta el runner para cada uno.
+    python -m src.cli redactar --medio-slug hoy-aragon --redactor-id UUID \\
+        [--senal-id UUID | --tema-libre "texto"]
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ import structlog
 from src.llm.embeddings import EmbeddingsClient, VoyageEmbeddings
 from src.trends.gdelt import GDELTDetector
 from src.trends.gtrends import GTrendsDetector
-from src.trends.persistence import get_pool
+from src.trends.persistence import close_pool, get_pool
 from src.trends.rss import RSSDetector
 from src.trends.runner import EjecucionResultado, ejecutar_fuente
 from src.trends.x_api import XApiDetector
@@ -38,9 +41,6 @@ def _setup_logging() -> None:
         processors=[
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
-            # Renderiza el traceback como string cuando exc_info=True
-            # (lo activa logger.exception). Sin esto el campo aparece como
-            # "exc_info": true literal y la traza se pierde.
             structlog.processors.format_exc_info,
             structlog.processors.JSONRenderer(),
         ],
@@ -50,15 +50,15 @@ def _setup_logging() -> None:
 async def _resolver_medio(dsn: str, slug: str) -> UUID | None:
     conn = await asyncpg.connect(dsn)
     try:
-        row = await conn.fetchrow("SELECT id FROM medios WHERE slug = $1 AND activo = TRUE", slug)
+        row = await conn.fetchrow(
+            "SELECT id FROM medios WHERE slug = $1 AND activo = TRUE", slug
+        )
         return row["id"] if row else None
     finally:
         await conn.close()
 
 
-def _build_detector(
-    nombre: str, pool: asyncpg.Pool
-) -> Any:
+def _build_detector(nombre: str, pool: asyncpg.Pool) -> Any:
     if nombre == "rss":
         return RSSDetector()
     if nombre == "gtrends":
@@ -66,15 +66,13 @@ def _build_detector(
     if nombre == "gdelt":
         return GDELTDetector()
     if nombre == "x":
-        # X API necesita pool para acquirir conexión dedicada para budget
-        # ops fuera de la transacción del runner. Ver docs/runbooks/budget.md.
         return XApiDetector(pool=pool)
     raise ValueError(f"detector desconocido: {nombre}")
 
 
-# Umbral de fallo: si la fracción de fuentes en estado 'error' supera este
-# valor, el CLI termina con exit code 2 para que el job de GH Actions se
-# marque rojo. Configurable vía env REDACTIA_FAIL_FRACTION.
+# ===========================================================================
+# Subcomando: detect (idéntico a PR A.1)
+# ===========================================================================
 _FAIL_FRACTION_DEFAULT = 0.5
 
 
@@ -82,16 +80,12 @@ async def cmd_detect(args: argparse.Namespace) -> int:
     dsn = os.environ["DATABASE_URL"]
     medio_id = await _resolver_medio(dsn, args.medio_slug)
     if medio_id is None:
-        # Esperado en Fase 2 mientras solo Hoy Aragón está onboardeado: el matrix
-        # del workflow contiene los 3 medios. No queremos rojo por eso.
         logger.info("medio_no_onboardado_skip", medio=args.medio_slug)
         print(f"[{args.medio_slug}] medio no onboardado — skip", file=sys.stderr)
         return 0
     embeddings: EmbeddingsClient = VoyageEmbeddings()
     pool = await get_pool(dsn)
 
-    # Lectura de fuentes en una conn aparte (autocommit, sin tx). Cada
-    # ``ejecutar_fuente`` adquirirá su propia conn y manejará su transacción.
     async with pool.acquire() as conn:
         await conn.execute(
             "SELECT set_config('app.medio_actual', $1, false)", str(medio_id)
@@ -112,10 +106,6 @@ async def cmd_detect(args: argparse.Namespace) -> int:
         print(f"[{args.medio_slug}] sin fuentes activas", file=sys.stderr)
         return 0
 
-    # Conteo por estado para el resumen final. Cada fuente se ejecuta en
-    # aislamiento: si una explota, las demás siguen. ejecutar_fuente captura
-    # internamente cualquier excepción y devuelve estado='error'; el try/except
-    # aquí es solo defensa en profundidad por si hay un bug en el aislamiento.
     conteo: dict[str, int] = {"ok": 0, "sin_resultados": 0, "error": 0, "otros": 0}
     for f in fuentes:
         det = _build_detector(f["detector"], pool)
@@ -149,19 +139,16 @@ async def cmd_detect(args: argparse.Namespace) -> int:
     sin_resultados = conteo["sin_resultados"]
     errores = conteo["error"] + conteo["otros"]
 
-    # Resumen visible en stdout (NO JSON) para que aparezca legible en el
-    # output del step de GH Actions.
     print(
         f"[{args.medio_slug}] {ok}/{total} OK, {sin_resultados} sin_resultados, "
         f"{errores}/{total} errores",
         file=sys.stderr,
     )
 
-    # Exit code != 0 si la fracción de errores supera el umbral. Por defecto
-    # 0.5: si más de la mitad de las fuentes fallan, falla el job. Configurable
-    # vía env para casos especiales (p.ej. arranque con muchas fuentes nuevas).
     try:
-        umbral = float(os.environ.get("REDACTIA_FAIL_FRACTION", _FAIL_FRACTION_DEFAULT))
+        umbral = float(
+            os.environ.get("REDACTIA_FAIL_FRACTION", _FAIL_FRACTION_DEFAULT)
+        )
     except ValueError:
         umbral = _FAIL_FRACTION_DEFAULT
     if total > 0 and (errores / total) > umbral:
@@ -176,6 +163,222 @@ async def cmd_detect(args: argparse.Namespace) -> int:
     return 0
 
 
+# ===========================================================================
+# Subcomando: redactar (PR B)
+# ===========================================================================
+async def cmd_redactar(args: argparse.Namespace) -> int:  # noqa: PLR0915
+    # Imports diferidos para que `python -m src.cli detect ...` siga arrancando
+    # rápido (no toca anthropic/google-genai si no se va a redactar).
+    from src.llm.brave import BraveSearch
+    from src.llm.claude import ClaudeReal
+    from src.llm.gemini import GeminiReal
+    from src.llm.pexels import PexelsClient
+    from src.pipeline import build_graph
+    from src.pipeline.nodes.deps import PipelineDeps
+    from src.pipeline.persistence import crear_run
+    from src.pipeline.state import PipelineState
+
+    dsn = os.environ["DATABASE_URL"]
+    medio_id = await _resolver_medio(dsn, args.medio_slug)
+    if medio_id is None:
+        print(f"ERROR: medio '{args.medio_slug}' no encontrado o inactivo", file=sys.stderr)
+        return 2
+
+    if not args.senal_id and not args.tema_libre:
+        print("ERROR: requiere --senal-id O --tema-libre", file=sys.stderr)
+        return 2
+    if args.senal_id and args.tema_libre:
+        print("ERROR: --senal-id y --tema-libre son mutuamente excluyentes", file=sys.stderr)
+        return 2
+
+    try:
+        redactor_id = UUID(args.redactor_id)
+        senal_uuid = UUID(args.senal_id) if args.senal_id else None
+    except ValueError as err:
+        print(f"ERROR: UUID inválido: {err}", file=sys.stderr)
+        return 2
+
+    pool = await get_pool(dsn)
+    try:
+        # Clientes reales con tracking de tokens.
+        claude = ClaudeReal()
+        gemini = GeminiReal()
+        embeddings = VoyageEmbeddings()
+        search = BraveSearch()
+        # Pexels es opcional: si no hay API key, draft sin imagen.
+        try:
+            images: Any = PexelsClient()
+        except RuntimeError:
+            logger.warning("pexels_no_configurado_sin_imagen")
+            images = _NoImages()
+
+        deps = PipelineDeps(
+            pool=pool,
+            claude=claude,
+            gemini=gemini,
+            search=search,
+            images=images,
+            embeddings=embeddings,
+        )
+
+        # Crear el run en BD antes de invocar el grafo.
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "SELECT set_config('app.medio_actual', $1, false)", str(medio_id)
+            )
+            run_id = await crear_run(
+                conn,
+                medio_id=medio_id,
+                redactor_id=redactor_id,
+                trigger_tipo="manual",
+                senal_id=senal_uuid,
+                tema_input=args.tema_libre,
+            )
+
+        state_inicial: PipelineState = {
+            "medio_id": medio_id,
+            "run_id": run_id,
+            "redactor_id": redactor_id,
+            "trigger_tipo": "manual",
+        }
+        if senal_uuid is not None:
+            state_inicial["senal_id"] = senal_uuid
+        if args.tema_libre:
+            state_inicial["tema_input"] = args.tema_libre
+
+        graph = build_graph(deps)
+        state_final = await graph.ainvoke(state_inicial)
+
+        # Resumen de salida.
+        _imprimir_resumen(
+            state_final=state_final,
+            run_id=run_id,
+            claude=claude,
+            gemini=gemini,
+            embeddings=embeddings,
+            search=search,
+            images=images,
+        )
+
+        # Exit code según estado final.
+        if state_final.get("detect_motivo_aborto") or state_final.get(
+            "research_motivo_aborto"
+        ):
+            return 1
+        if state_final.get("requiere_revision_humana"):
+            return 0  # OK, requiere revisión humana
+        if not state_final.get("draft_id"):
+            return 1
+        return 0
+    finally:
+        await close_pool()
+
+
+class _NoImages:
+    """Fallback cuando PEXELS_API_KEY no está configurada."""
+
+    calls_total: int = 0
+
+    async def buscar_imagen(self, query: str) -> dict | None:  # noqa: ARG002
+        return None
+
+
+def _imprimir_resumen(
+    *,
+    state_final: dict,
+    run_id: UUID,
+    claude: Any,
+    gemini: Any,
+    embeddings: Any,
+    search: Any,
+    images: Any,
+) -> None:
+    """Print al stderr del resumen + coste estimado. stdout queda libre para
+    quien quiera parsear el state_final (no lo hacemos por ahora)."""
+    from src.llm.precios import calcular_coste_eur
+
+    print("=" * 72, file=sys.stderr)
+    estado_run = _estado_run_desde_state(state_final)
+    print(f"Estado: {estado_run}", file=sys.stderr)
+    print(f"Run ID: {run_id}", file=sys.stderr)
+    draft_id = state_final.get("draft_id")
+    if draft_id:
+        print(f"Draft ID: {draft_id}", file=sys.stderr)
+        print(f"URL editor: {state_final.get('editor_url')}", file=sys.stderr)
+    motivo = state_final.get("detect_motivo_aborto") or state_final.get(
+        "research_motivo_aborto"
+    )
+    if motivo:
+        print(f"Motivo aborto: {motivo}", file=sys.stderr)
+    if state_final.get("requiere_revision_humana"):
+        errores = state_final.get("review_errores") or []
+        print(
+            f"Requiere revisión humana ({len(errores)} errores):",
+            file=sys.stderr,
+        )
+        for e in errores[:10]:
+            print(f"  - {e}", file=sys.stderr)
+
+    print("", file=sys.stderr)
+    print("Tokens consumidos:", file=sys.stderr)
+    total_eur = 0.0
+    coste_desconocido = False
+    for modelo in sorted(claude.tokens_in_por_modelo.keys()):
+        tin = claude.tokens_in_por_modelo.get(modelo, 0)
+        tout = claude.tokens_out_por_modelo.get(modelo, 0)
+        coste = calcular_coste_eur(modelo, tin, tout)
+        coste_str = f"{coste:.4f} EUR" if coste is not None else "coste desconocido"
+        if coste is None:
+            coste_desconocido = True
+        else:
+            total_eur += coste
+        print(
+            f"  - {modelo}: {tin/1000:.1f}k in / {tout/1000:.1f}k out → {coste_str}",
+            file=sys.stderr,
+        )
+    for modelo in sorted(gemini.tokens_in_por_modelo.keys()):
+        tin = gemini.tokens_in_por_modelo.get(modelo, 0)
+        tout = gemini.tokens_out_por_modelo.get(modelo, 0)
+        coste = calcular_coste_eur(modelo, tin, tout)
+        coste_str = f"{coste:.4f} EUR" if coste is not None else "coste desconocido"
+        if coste is None:
+            coste_desconocido = True
+        else:
+            total_eur += coste
+        print(
+            f"  - {modelo}: {tin/1000:.1f}k in / {tout/1000:.1f}k out → {coste_str}",
+            file=sys.stderr,
+        )
+    voyage_calls = getattr(embeddings, "calls_total", None) or 0
+    if voyage_calls:
+        print(
+            f"  - voyage-3-large: {voyage_calls} llamadas (coste según tokens reales)",
+            file=sys.stderr,
+        )
+    if hasattr(images, "calls_total"):
+        print(f"  - pexels: {images.calls_total} llamadas (gratis)", file=sys.stderr)
+    brave_calls = getattr(search, "calls_total", None) or 0
+    if brave_calls:
+        print(f"  - brave: {brave_calls} llamadas", file=sys.stderr)
+
+    sufijo = " (incompleto)" if coste_desconocido else ""
+    print(f"Total estimado: {total_eur:.4f} EUR{sufijo}", file=sys.stderr)
+    print("=" * 72, file=sys.stderr)
+
+
+def _estado_run_desde_state(state: dict) -> str:
+    if state.get("detect_motivo_aborto") or state.get("research_motivo_aborto"):
+        return "rechazado"
+    if state.get("requiere_revision_humana"):
+        return "requiere_revision"
+    if state.get("draft_id") and state.get("review_aprobado"):
+        return "completado"
+    return "fallido"
+
+
+# ===========================================================================
+# Entry point
+# ===========================================================================
 def main(argv: list[str] | None = None) -> int:
     _setup_logging()
     parser = argparse.ArgumentParser(prog="redactia-workers")
@@ -189,9 +392,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Limita a un detector concreto (opcional)",
     )
 
+    p_red = sub.add_parser("redactar", help="Lanza el pipeline multiagente")
+    p_red.add_argument("--medio-slug", required=True)
+    p_red.add_argument("--redactor-id", required=True, help="UUID del redactor")
+    grupo = p_red.add_mutually_exclusive_group(required=True)
+    grupo.add_argument("--senal-id", help="UUID de la señal a redactar")
+    grupo.add_argument("--tema-libre", help="Tema libre (sin breaking; va a evergreen)")
+
     args = parser.parse_args(argv)
     if args.cmd == "detect":
         return asyncio.run(cmd_detect(args))
+    if args.cmd == "redactar":
+        return asyncio.run(cmd_redactar(args))
     parser.print_help()
     return 1
 
