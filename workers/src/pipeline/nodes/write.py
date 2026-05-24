@@ -10,7 +10,6 @@ Salida: ``titulo``, ``meta_title``, ``meta_descr``, ``slug``, ``cuerpo_md``.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -18,6 +17,7 @@ from uuid import UUID
 import structlog
 from jinja2 import Template
 
+from src.llm._json_utils import parse_json_tolerante
 from src.llm.claude import json_output_kwargs
 from src.llm.config import CLAUDE_SONNET_MODEL
 from src.pipeline.nodes.deps import PipelineDeps
@@ -83,9 +83,8 @@ async def write_node(state: PipelineState, deps: PipelineDeps) -> PipelineState:
         **json_output_kwargs(),
     )
 
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
+    data = parse_json_tolerante(raw)
+    if data is None:
         logger.warning("write_respuesta_no_json", preview=raw[:200])
         data = {}
 

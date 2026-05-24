@@ -154,11 +154,22 @@ def json_output_kwargs(extra_system: str = "") -> dict[str, Any]:
 
     Uso::
 
+        from src.llm._json_utils import parse_json_tolerante
         raw = await claude.generar(prompt, modelo=..., **json_output_kwargs())
-        data = json.loads(raw)
+        data = parse_json_tolerante(raw)
+        if data is None:
+            ...
 
-    Devuelve kwargs con ``system`` que pide JSON puro y ``prefill="{"`` para
-    forzar al modelo a continuar el JSON. La salida final ya empieza por ``{``.
+    Devuelve kwargs con ``system`` que pide JSON puro y ``temperature=0.3``.
+
+    NOTA: NO usamos ``prefill="{"`` aquí — los modelos Sonnet 4.6+ rechazan
+    terminar la conversación con un mensaje assistant
+    (``BadRequestError: This model does not support assistant message prefill.
+    The conversation must end with a user message.``). El system prompt +
+    temperature baja basta para que el modelo emita JSON limpio; si añade
+    fences o texto extra, ``parse_json_tolerante`` los limpia. La capacidad
+    ``prefill`` sigue disponible en ``ClaudeReal.generar`` para modelos que
+    sí la soporten (claude-3.x), pero no la activamos por defecto.
     """
     base = (
         "Responde EXCLUSIVAMENTE con un objeto JSON válido, sin texto antes "
@@ -166,4 +177,4 @@ def json_output_kwargs(extra_system: str = "") -> dict[str, Any]:
         "termina por }."
     )
     system = f"{extra_system}\n{base}" if extra_system else base
-    return {"system": system, "prefill": "{", "temperature": 0.3}
+    return {"system": system, "temperature": 0.3}
