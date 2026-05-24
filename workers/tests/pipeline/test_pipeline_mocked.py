@@ -31,13 +31,21 @@ ADMIN_DSN = os.environ.get("DATABASE_URL_ADMIN", APP_DSN)
 pytestmark = pytest.mark.skipif(not APP_DSN, reason="DATABASE_URL no definido")
 
 # Meta descriptions de 140-160 chars usadas en los JSON mock del nodo write.
+# Verificamos longitud en import-time para que cambios manuales no rompan
+# silenciosamente los tests del review (rango 140-160).
 META_DESCR_OK_A = (
-    "Resumen del artículo en una descripción que cabe entre 140 y 160 "
-    "caracteres exactos como pide el SEO de este medio para esto."
+    "Resumen del artículo: el Gobierno de Aragón ha presentado los nuevos "
+    "presupuestos generales del año 2026 con un aumento del cinco por ciento."
 )
 META_DESCR_OK_B = (
-    "Descripción de prueba que cabe exactamente entre los ciento cuarenta "
-    "y ciento sesenta caracteres requeridos hoy mismo bajo el SEO."
+    "Descripción de prueba para el SEO: la redacción de Hoy Aragón cubre los "
+    "presupuestos autonómicos con énfasis en sanidad y educación pública."
+)
+assert 140 <= len(META_DESCR_OK_A) <= 160, (
+    f"META_DESCR_OK_A debe tener 140-160 chars, tiene {len(META_DESCR_OK_A)}"
+)
+assert 140 <= len(META_DESCR_OK_B) <= 160, (
+    f"META_DESCR_OK_B debe tener 140-160 chars, tiene {len(META_DESCR_OK_B)}"
 )
 
 
@@ -74,8 +82,12 @@ def _draft_json(titulo: str, cuerpo: str, fuentes_urls: list[str]) -> str:
     )
 
 
-def _cuerpo_700_palabras(fuente_url: str) -> str:
-    """Genera ~700 palabras que cumplen el rango 'normal' (600-900)."""
+def _cuerpo_palabras(fuente_url: str, target: int = 900) -> str:
+    """Genera al menos ``target`` palabras (default 900: rango evergreen 800-1000).
+
+    detect_node con tema_input pone urgencia='evergreen' → review exige
+    800-1000 palabras. Para tests con señal+normal, pasar target=750.
+    """
     parrafo = (
         "El Gobierno de Aragón ha presentado los presupuestos para 2026, "
         "con un incremento del cinco por ciento respecto al año anterior. "
@@ -84,11 +96,15 @@ def _cuerpo_700_palabras(fuente_url: str) -> str:
         "del medio rural. Según fuentes del Ejecutivo, el objetivo es consolidar "
         "los servicios básicos en zonas con baja densidad de población. "
     )
-    # Repetir hasta 700 palabras aprox.
     cuerpo = ""
-    while len(cuerpo.split()) < 700:
+    while len(cuerpo.split()) < target:
         cuerpo += parrafo
     cuerpo += f"\n\nFuente: {fuente_url}"
+    # Recorta si nos pasamos del techo (1000 para evergreen).
+    palabras = cuerpo.split()
+    if len(palabras) > 1000:
+        palabras = palabras[:980]
+        cuerpo = " ".join(palabras) + f"\n\nFuente: {fuente_url}"
     return cuerpo
 
 
@@ -131,7 +147,7 @@ async def test_pipeline_end_to_end_dry_run_persiste_draft() -> None:
                 "persona|Jorge Azcón\norganizacion|DGA",            # research NER
                 _draft_json(
                     "Azcón presenta los presupuestos de Aragón para 2026",
-                    _cuerpo_700_palabras(fuente_urls[0]),
+                    _cuerpo_palabras(fuente_urls[0]),
                     fuente_urls,
                 ),                                                   # write
                 "",                                                  # review (sin errores)
@@ -338,7 +354,7 @@ async def test_review_detecta_invencion_url_fantasma() -> None:
         ]
         url_fantasma = "https://inventado.es/no-existe"
         cuerpo_con_fantasma = (
-            _cuerpo_700_palabras(fuente_urls[0])
+            _cuerpo_palabras(fuente_urls[0])
             + f"\n\nVer también: {url_fantasma}"
         )
         deps = await _construir_deps(
