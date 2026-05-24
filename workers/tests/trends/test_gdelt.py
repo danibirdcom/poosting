@@ -111,3 +111,23 @@ async def test_gdelt_reintenta_429_y_recupera(monkeypatch, _instant_retries) -> 
     assert len(senales) == 1
     assert senales[0].termino == "OK"
     assert len(intentos) == 2
+
+
+@pytest.mark.asyncio
+async def test_gdelt_200_pero_no_json_devuelve_vacio(monkeypatch) -> None:
+    """GDELT a veces devuelve 200 OK con HTML (interstitial/mantenimiento).
+    El detector debe tratar el JSONDecodeError como sin resultados, no lanzar.
+    """
+
+    async def fake_get(self, url, params=None):
+        return httpx.Response(
+            200,
+            text="<html><body>Service temporarily unavailable</body></html>",
+            headers={"content-type": "text/html"},
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+    senales = await GDELTDetector().detectar(_ctx())
+    assert senales == []

@@ -13,6 +13,7 @@ Doc: https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -90,7 +91,18 @@ class GDELTDetector:
             )
             return []
         resp.raise_for_status()
-        data = resp.json()
+        # GDELT a veces devuelve 200 OK con HTML de error (interstitial, captcha,
+        # mantenimiento) en lugar de JSON. Capturamos el JSONDecodeError y
+        # tratamos como "sin resultados" — el cron siguiente lo intentará.
+        try:
+            data = resp.json()
+        except json.JSONDecodeError:
+            logger.warning(
+                "gdelt_respuesta_no_json",
+                content_type=resp.headers.get("content-type"),
+                contenido_preview=resp.text[:200],
+            )
+            return []
 
         articles: list[dict[str, Any]] = data.get("articles", []) or []
         senales: list[SenalCruda] = []
