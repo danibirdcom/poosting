@@ -26,6 +26,18 @@ from src.trends.persistence import close_pool, get_pool
 
 from .fakes import FakeImageBank, FakeLLM, FakeSearch, fuente_falsa
 
+
+def _detect_json(
+    tema_final: str = "Presupuestos 2026 Aragón",
+    urgencia: str = "evergreen",
+    angulo: str = "general",
+) -> str:
+    """Respuesta JSON estricta que un Haiku bien comportado devuelve para detect."""
+    return json.dumps(
+        {"tema_final": tema_final, "angulo": angulo, "urgencia": urgencia},
+        ensure_ascii=False,
+    )
+
 APP_DSN = os.environ.get("DATABASE_URL", "")
 ADMIN_DSN = os.environ.get("DATABASE_URL_ADMIN", APP_DSN)
 pytestmark = pytest.mark.skipif(not APP_DSN, reason="DATABASE_URL no definido")
@@ -142,15 +154,27 @@ async def test_pipeline_end_to_end_dry_run_persiste_draft() -> None:
         ]
         deps = await _construir_deps(
             search_resultados=[fuente_falsa(u) for u in fuente_urls],
-            llm_respuestas_gemini=["Azcón presenta presupuestos 2026"],
+            llm_respuestas_gemini=[
+                json.dumps(
+                    {
+                        "hechos": [
+                            {
+                                "afirmacion": "Azcón presenta presupuestos 2026",
+                                "fuentes": [fuente_urls[0]],
+                            }
+                        ]
+                    }
+                ),
+            ],
             llm_respuestas_claude=[
-                "persona|Jorge Azcón\norganizacion|DGA",            # research NER
+                _detect_json("Presupuestos 2026 Aragón", "evergreen"),  # detect
+                "persona|Jorge Azcón\norganizacion|DGA",                # research NER
                 _draft_json(
                     "Azcón presenta los presupuestos de Aragón para 2026",
                     _cuerpo_palabras(fuente_urls[0]),
                     fuente_urls,
-                ),                                                   # write
-                "",                                                  # review (sin errores)
+                ),                                                       # write
+                "",                                                      # review (sin errores)
             ],
             imagen={"url": "https://images.pexels.com/photos/1234.jpg"},
         )
@@ -221,7 +245,9 @@ async def test_research_minimo_3_fuentes_aborta() -> None:
                 fuente_falsa("https://dos.es/a"),
             ],
             llm_respuestas_gemini=[],
-            llm_respuestas_claude=[],
+            llm_respuestas_claude=[
+                _detect_json("Tema con pocas fuentes", "evergreen"),
+            ],
         )
         from uuid import UUID
         medio_id = UUID(medio_id_str)
@@ -247,7 +273,6 @@ async def test_research_minimo_3_fuentes_aborta() -> None:
                 "run_id": run_id,
                 "trigger_tipo": "manual",
                 "tema_input": "Tema con pocas fuentes",
-                "urgencia": "normal",  # exige 3 fuentes
             }
         )
         # Como detect detecta tema libre y le pone urgencia='evergreen'
@@ -294,7 +319,9 @@ async def test_research_aborta_con_senal_normal_2_fuentes() -> None:
                 fuente_falsa("https://dos.es/a"),
             ],
             llm_respuestas_gemini=[],
-            llm_respuestas_claude=[],
+            llm_respuestas_claude=[
+                _detect_json("Tema test", "normal"),  # detect: urgencia=normal
+            ],
         )
         from uuid import UUID
         medio_id = UUID(medio_id_str)
@@ -320,7 +347,6 @@ async def test_research_aborta_con_senal_normal_2_fuentes() -> None:
                 "run_id": run_id,
                 "trigger_tipo": "manual",
                 "senal_id": senal_id,
-                # detect_node lee la señal y pone urgencia='normal'
             }
         )
         assert state_final.get("research_motivo_aborto") == "fuentes_insuficientes"
@@ -359,9 +385,21 @@ async def test_review_detecta_invencion_url_fantasma() -> None:
         )
         deps = await _construir_deps(
             search_resultados=[fuente_falsa(u) for u in fuente_urls],
-            llm_respuestas_gemini=["Hecho 1\nHecho 2\nHecho 3"],
+            llm_respuestas_gemini=[
+                json.dumps(
+                    {
+                        "hechos": [
+                            {
+                                "afirmacion": "Hecho verificado uno",
+                                "fuentes": [fuente_urls[0]],
+                            }
+                        ]
+                    }
+                ),
+            ],
             llm_respuestas_claude=[
-                "persona|Jorge Azcón",
+                _detect_json("Cita inventada", "evergreen"),  # detect
+                "persona|Jorge Azcón",                          # research NER
                 json.dumps(
                     {
                         "titulo": "Título largo válido sobre presupuestos de Aragón 2026",
@@ -485,7 +523,10 @@ async def test_paywall_no_entra_en_fuentes() -> None:
                 fuente_falsa("https://europapress.es/d"),
             ],
             llm_respuestas_gemini=["Hecho 1"],
-            llm_respuestas_claude=[""],
+            llm_respuestas_claude=[
+                _detect_json("Tema con fuentes mixtas", "evergreen"),
+                "",  # NER vacío
+            ],
         )
         from uuid import UUID
         medio_id = UUID(medio_id_str)

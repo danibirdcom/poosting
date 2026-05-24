@@ -36,6 +36,16 @@ class ImageBankClient(Protocol):
     async def buscar_imagen(self, query: str) -> dict | None: ...
 
 
+class EmbeddingsClient(Protocol):
+    """Embeddings de Voyage (o equivalente). Usado por ``detect`` para el
+    check de canibalización semántica contra ``drafts.embedding``.
+    """
+
+    async def embed(
+        self, textos: list[str], input_type: str = "document"
+    ) -> list[list[float]]: ...
+
+
 @dataclass
 class PipelineDeps:
     """Bundle de clientes inyectados al pipeline."""
@@ -45,3 +55,6 @@ class PipelineDeps:
     gemini: LLMClient
     search: SearchClient
     images: ImageBankClient
+    # Opcional: detect lo necesita para canibalización semántica. Si no se
+    # pasa, detect cae a chequeo solo por ``drafts.senal_id`` exacto.
+    embeddings: EmbeddingsClient | None = None

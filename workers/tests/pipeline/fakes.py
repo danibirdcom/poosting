@@ -51,6 +51,30 @@ class FakeImageBank:
         return self.imagen
 
 
+@dataclass
+class FakeEmbeddings:
+    """Devuelve vectores deterministas de 1024 dims.
+
+    Por defecto cada texto produce el mismo vector (útil para "señal idéntica
+    a draft" en tests de canibalización). Sobrescribe ``vector_por_texto``
+    con un dict {texto: vector} para variantes.
+    """
+
+    vector_por_texto: dict[str, list[float]] = field(default_factory=dict)
+    vector_default: list[float] = field(
+        default_factory=lambda: [0.1] * 1024
+    )
+    llamadas: list[dict[str, Any]] = field(default_factory=list)
+
+    async def embed(
+        self, textos: list[str], input_type: str = "document"
+    ) -> list[list[float]]:
+        self.llamadas.append({"textos": list(textos), "input_type": input_type})
+        return [
+            self.vector_por_texto.get(t, list(self.vector_default)) for t in textos
+        ]
+
+
 def fuente_falsa(
     url: str,
     titulo: str = "",
