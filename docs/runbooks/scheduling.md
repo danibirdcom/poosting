@@ -57,4 +57,4 @@ inputs.
 | 2026-05-22 | Cron */15 activo desde el merge inicial de Fase 2. |
 | 2026-05-22 | Run #7 expuso bugs (codec JSONB + transacción global). Hotfix en PR #3 y PR #4. |
 | 2026-05-23 | Tras los fixes, **desactivamos el cron** durante 72h para validación manual. Solo `workflow_dispatch`. |
-| (pendiente) | Reactivar cron tras 72h sin incidencias. |
+| 2026-05-24 | Cron schedule reactivado tras validación manual exitosa. Fase 2 cerrada con 45 señales reales detectadas, hash de merge fase 2 = `e1f25da`. |
