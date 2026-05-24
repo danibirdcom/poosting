@@ -82,8 +82,22 @@ REGLAS DURAS (incumplirlas invalida el artículo):
 - Longitud del cuerpo: entre {{ min_palabras }} y {{ max_palabras }} palabras.
 - H2s descriptivos en sentence case. NO clickbait.
 - Cada hecho concreto debe poder rastrearse a un item de <hechos_verificados>.
-- Citas textuales: máximo 15 palabras seguidas, máximo 1 por fuente. El resto
-  parafraseado en tu voz.
+
+- **CITAS INLINE OBLIGATORIAS**: el cuerpo debe contener AL MENOS 2 enlaces
+  markdown a URLs distintas de <hechos_verificados>. Formato:
+  `[texto descriptivo del enlace](https://url-de-la-fuente)`.
+  Inserta los enlaces inline en frases que aporten contexto al lector,
+  no en una lista al final.
+  Ejemplo CORRECTO:
+    "según [un reportaje de El Periódico de Aragón](https://elperiodicodearagon.com/...),
+     el presupuesto crece un 5%"
+  Ejemplo INCORRECTO (no cuenta como cita inline):
+    "según El Periódico de Aragón, el presupuesto crece un 5%" (sin enlace)
+  Ejemplo INCORRECTO (cita al final, no inline):
+    "...crece un 5%. Fuentes: https://elperiodicodearagon.com/..."
+
+- Citas textuales (entre comillas): máximo 15 palabras seguidas, máximo 1
+  cita textual por fuente. El resto, parafraseado en tu voz.
 - URLs de X.com (twitter): NO las menciones por su URL técnica
   (x.com/i/web/status/...). Refiérete a ellas como "una publicación en X" o
   "según una publicación de @usuario en X" si la fuente lo proporciona.
