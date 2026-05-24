@@ -50,14 +50,34 @@ def build_graph(deps: PipelineDeps):
     """
     g: StateGraph = StateGraph(PipelineState)
 
-    # Cada nodo se envuelve para inyectar deps. LangGraph llama con
-    # ``await node(state)``; las deps van por closure.
-    g.add_node("detect", lambda s: detect_node(s, deps))
-    g.add_node("research", lambda s: research_node(s, deps))
-    g.add_node("write", lambda s: write_node(s, deps))
-    g.add_node("review", lambda s: review_node(s, deps))
-    g.add_node("enrich", lambda s: enrich_node(s, deps))
-    g.add_node("publish", lambda s: publish_node(s, deps))
+    # LangGraph espera funciones ``async def`` reales que devuelvan dict —
+    # no lambdas síncronos que devuelvan corrutinas (eso da
+    # InvalidUpdateError: "Expected dict, got <coroutine object>"). Cada
+    # wrapper aquí satisface esa firma y captura ``deps`` por closure.
+    async def _detect(state: PipelineState) -> PipelineState:
+        return await detect_node(state, deps)
+
+    async def _research(state: PipelineState) -> PipelineState:
+        return await research_node(state, deps)
+
+    async def _write(state: PipelineState) -> PipelineState:
+        return await write_node(state, deps)
+
+    async def _review(state: PipelineState) -> PipelineState:
+        return await review_node(state, deps)
+
+    async def _enrich(state: PipelineState) -> PipelineState:
+        return await enrich_node(state, deps)
+
+    async def _publish(state: PipelineState) -> PipelineState:
+        return await publish_node(state, deps)
+
+    g.add_node("detect", _detect)
+    g.add_node("research", _research)
+    g.add_node("write", _write)
+    g.add_node("review", _review)
+    g.add_node("enrich", _enrich)
+    g.add_node("publish", _publish)
 
     g.set_entry_point("detect")
     g.add_conditional_edges(
