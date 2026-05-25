@@ -26,7 +26,9 @@ def _patch_httpx(monkeypatch: pytest.MonkeyPatch, handler) -> None:  # type: ign
 def test_voyage_calls_total_inicializa_en_cero() -> None:
     client = VoyageEmbeddings(api_key="test-key")
     assert hasattr(client, "calls_total")
+    assert hasattr(client, "tokens_in_total")
     assert client.calls_total == 0
+    assert client.tokens_in_total == 0
 
 
 async def test_voyage_calls_total_incrementa_en_cada_llamada(
@@ -38,19 +40,43 @@ async def test_voyage_calls_total_incrementa_en_cada_llamada(
             json={
                 "data": [
                     {"embedding": [0.1] * 1024, "index": 0},
-                ]
+                ],
+                "usage": {"total_tokens": 7},
             },
         )
 
     _patch_httpx(monkeypatch, handler)
     client = VoyageEmbeddings(api_key="test-key")
     assert client.calls_total == 0
+    assert client.tokens_in_total == 0
 
     await client.embed(["texto 1"])
     assert client.calls_total == 1
+    assert client.tokens_in_total == 7
 
     await client.embed(["texto 2"])
     assert client.calls_total == 2
+    assert client.tokens_in_total == 14
+
+
+async def test_voyage_tokens_in_total_tolera_respuesta_sin_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Si la respuesta no trae 'usage', tokens_in_total queda en 0 pero la
+    llamada cuenta como exitosa.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"data": [{"embedding": [0.1] * 1024, "index": 0}]},
+        )
+
+    _patch_httpx(monkeypatch, handler)
+    client = VoyageEmbeddings(api_key="test-key")
+    await client.embed(["x"])
+    assert client.calls_total == 1
+    assert client.tokens_in_total == 0
 
 
 async def test_voyage_calls_total_no_incrementa_con_textos_vacios(

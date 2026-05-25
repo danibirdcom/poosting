@@ -20,6 +20,7 @@ from jinja2 import Template
 from src.llm._json_utils import parse_json_tolerante
 from src.llm.claude import json_output_kwargs
 from src.llm.config import CLAUDE_SONNET_MODEL
+from src.pipeline.nodes._fuentes import preparar_fuentes_contenido
 from src.pipeline.nodes.deps import PipelineDeps
 from src.pipeline.state import PipelineState
 
@@ -118,12 +119,8 @@ async def _construir_contexto(
     tema = state.get("tema_final", "")
 
     async with deps.pool.acquire() as conn:
-        await conn.execute(
-            "SELECT set_config('app.medio_actual', $1, false)", str(medio_id)
-        )
-        medio_nombre = await conn.fetchval(
-            "SELECT nombre FROM medios WHERE id = $1", medio_id
-        )
+        await conn.execute("SELECT set_config('app.medio_actual', $1, false)", str(medio_id))
+        medio_nombre = await conn.fetchval("SELECT nombre FROM medios WHERE id = $1", medio_id)
         redactor_nombre = "redacción"
         style_guide_md = ""
         variante_md: str | None = None
@@ -157,9 +154,7 @@ async def _construir_contexto(
                 if var_row is not None:
                     variante_md = var_row["ajustes_md"]
 
-            ejemplos = await _cargar_ejemplos_top_n(
-                conn, redactor_id, tema, deps, EJEMPLOS_TOP_N
-            )
+            ejemplos = await _cargar_ejemplos_top_n(conn, redactor_id, tema, deps, EJEMPLOS_TOP_N)
             correcciones = await _cargar_correcciones_recientes(
                 conn, redactor_id, CORRECCIONES_TOP_N
             )
@@ -172,6 +167,11 @@ async def _construir_contexto(
         "ejemplos": ejemplos,
         "correcciones_recientes": correcciones,
         "hechos": state.get("hechos_verificados") or [],
+        # fuentes_contenido: texto íntegro resumido de las fuentes, para
+        # que el redactor tome detalles ricos (nombres de lugares, cifras,
+        # contexto). Lo prepara el mismo helper que usa review (truncado
+        # a ~10k chars). Política CLAUDE.md §5.3.
+        "fuentes_contenido": preparar_fuentes_contenido(state),
         "entidades": state.get("entidades") or [],
         "tema_final": tema,
         "angulo": state.get("angulo", "general"),
@@ -204,8 +204,7 @@ async def _cargar_ejemplos_top_n(
             n,
         )
         return [
-            {"titulo": r["titulo"] or "(sin título)", "texto": r["texto_completo"]}
-            for r in rows
+            {"titulo": r["titulo"] or "(sin título)", "texto": r["texto_completo"]} for r in rows
         ]
 
     vectors = await deps.embeddings.embed([tema], input_type="query")
@@ -226,10 +225,7 @@ async def _cargar_ejemplos_top_n(
         emb_lit,
         n,
     )
-    return [
-        {"titulo": r["titulo"] or "(sin título)", "texto": r["texto_completo"]}
-        for r in rows
-    ]
+    return [{"titulo": r["titulo"] or "(sin título)", "texto": r["texto_completo"]} for r in rows]
 
 
 async def _cargar_correcciones_recientes(

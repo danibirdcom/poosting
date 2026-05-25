@@ -62,6 +62,9 @@ class VoyageEmbeddings:
         # y los smoke scripts leen este contador para reportar uso. Se
         # incrementa una vez por llamada exitosa (no por reintento).
         self.calls_total: int = 0
+        # Voyage devuelve usage.total_tokens en la respuesta. Lo acumulamos
+        # para coste futuro (no se imputa aún en calcular_coste_eur).
+        self.tokens_in_total: int = 0
 
     async def embed(
         self, textos: list[str], input_type: InputType = "document"
@@ -71,12 +74,13 @@ class VoyageEmbeddings:
         if not self._api_key:
             raise RuntimeError("VOYAGE_API_KEY no configurada")
 
-        result = await self._embed_with_retry(textos, input_type)
+        embeddings, total_tokens = await self._embed_with_retry(textos, input_type)
         # Solo incrementamos en éxito; si _embed_with_retry agota retries y
         # lanza, no contamos esa llamada (no consumió cuota efectiva del
         # endpoint, o si lo hizo, la trazabilidad del fallo va por logs).
         self.calls_total += 1
-        return result
+        self.tokens_in_total += total_tokens
+        return embeddings
 
     @retry(
         stop=stop_after_attempt(3),
@@ -86,7 +90,7 @@ class VoyageEmbeddings:
     )
     async def _embed_with_retry(
         self, textos: list[str], input_type: InputType
-    ) -> list[list[float]]:
+    ) -> tuple[list[list[float]], int]:
         payload = {
             "input": textos,
             "model": self.MODEL,
@@ -97,10 +101,11 @@ class VoyageEmbeddings:
         async with httpx.AsyncClient(timeout=self._timeout_s) as client:
             resp = await client.post(self.BASE_URL, json=payload, headers=headers)
             if resp.status_code == 429 or resp.status_code >= 500:
-                logger.warning(
-                    "voyage_retry", status=resp.status_code, n_textos=len(textos)
-                )
+                logger.warning("voyage_retry", status=resp.status_code, n_textos=len(textos))
                 resp.raise_for_status()  # dispara HTTPStatusError → retry
             resp.raise_for_status()
             data = resp.json()
-        return [item["embedding"] for item in data["data"]]
+        embeddings = [item["embedding"] for item in data["data"]]
+        usage = data.get("usage") or {}
+        total_tokens = int(usage.get("total_tokens", 0) or 0)
+        return embeddings, total_tokens
