@@ -14,9 +14,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.pipeline.nodes.review import (
+    DOMINIOS_COMPETIDORES,
     EXCEPCIONES_PERMITIDAS,
     LISTA_MEDIOS_COMPETIDORES,
     _detectar_menciones_competidores,
+    _detectar_urls_competidores,
     _normalizar_texto,
 )
 
@@ -67,16 +69,55 @@ def test_review_marca_heraldo_y_el_espanol() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Aceptación: el cuerpo enlaza sin nombrar al competidor
+# Detección de URLs competidoras en markdown links (vertiente 2 de la política)
 # ---------------------------------------------------------------------------
-def test_review_acepta_enlace_sin_nombrar_competidor() -> None:
-    """Anchor neutral + URL del competidor en el path → NO es error."""
+def test_review_detecta_url_competidor_en_markdown_link() -> None:
+    """Anchor neutral + URL del competidor en `(url)` → error (v1.2.0)."""
     cuerpo = (
-        "El festival registró [una afluencia récord en la tercera "
-        "jornada](https://www.elperiodicodearagon.com/zaragoza/festival), "
+        "El festival registró [una afluencia récord](https://www.elperiodicodearagon.com/x) "
         "con miles de visitantes."
     )
+    # _detectar_menciones_competidores quita la URL; mira solo nombres visibles.
     assert _detectar_menciones_competidores(cuerpo) == []
+    # _detectar_urls_competidores sí marca el dominio del enlace.
+    errores = _detectar_urls_competidores(cuerpo)
+    assert any("elperiodicodearagon.com" in e for e in errores)
+
+
+def test_review_detecta_url_competidor_con_subdominio() -> None:
+    """Subdominios de competidores también bloquean."""
+    cuerpo = "Ver [crónica](https://aragon.elespanol.com/x) para más detalle."
+    errores = _detectar_urls_competidores(cuerpo)
+    assert any("elespanol.com" in e for e in errores)
+
+
+def test_review_acepta_link_institucional() -> None:
+    """Enlace a institución → sin error."""
+    cuerpo = "Ver [el Ayuntamiento](https://www.zaragoza.es/sede/) informa."
+    assert _detectar_urls_competidores(cuerpo) == []
+
+
+def test_review_acepta_link_a_agencia_efe() -> None:
+    cuerpo = "Una crónica de [EFE](https://efe.com/es/zaragoza/x)."
+    assert _detectar_urls_competidores(cuerpo) == []
+
+
+def test_review_url_desnuda_no_dispara_detectar_urls_competidores() -> None:
+    """Solo detectamos URLs DENTRO de markdown links. URLs sueltas no
+    cuentan para esta vertiente (las cubre _checks_citas/_consultar_llm).
+    """
+    cuerpo = "Ver https://elperiodicodearagon.com/x sin formato markdown."
+    assert _detectar_urls_competidores(cuerpo) == []
+
+
+def test_review_url_competidor_no_duplica_si_aparece_dos_veces() -> None:
+    cuerpo = (
+        "Ver [un reportaje](https://elperiodicodearagon.com/x) y también "
+        "[otra crónica](https://www.elperiodicodearagon.com/y) sobre el tema."
+    )
+    errores = _detectar_urls_competidores(cuerpo)
+    # Solo 1 entrada por dominio.
+    assert len([e for e in errores if "elperiodicodearagon.com" in e]) == 1
 
 
 def test_review_acepta_agencia_efe() -> None:
@@ -105,8 +146,11 @@ def test_review_acepta_europa_press_y_reuters() -> None:
 # ---------------------------------------------------------------------------
 # Casos límite
 # ---------------------------------------------------------------------------
-def test_review_no_marca_si_solo_aparece_url_del_competidor() -> None:
-    """URL del competidor en el path NO cuenta como mención nominal."""
+def test_review_menciones_competidores_no_mira_urls() -> None:
+    """``_detectar_menciones_competidores`` solo mira nombres visibles.
+    Las URLs (incluso a dominios competidores) las cubre
+    ``_detectar_urls_competidores`` en una validación aparte.
+    """
     cuerpo = (
         "Más detalles en [el reportaje completo](https://www.elperiodicodearagon.com/x) "
         "y en [esta cobertura](https://heraldo.es/y)."
@@ -160,6 +204,13 @@ def test_listas_son_disjuntas_y_normalizadas() -> None:
         assert nombre == _normalizar_texto(nombre), f"{nombre!r} no está normalizado"
 
 
+def test_dominios_competidores_son_lowercase() -> None:
+    for d in DOMINIOS_COMPETIDORES:
+        assert d == d.lower()
+        assert not d.startswith("www.")
+        assert "." in d, "debe ser dominio completo, no nickname"
+
+
 # ---------------------------------------------------------------------------
 # Verificación del prompt write: incluye ejemplos anti-competencia
 # ---------------------------------------------------------------------------
@@ -177,3 +228,30 @@ def test_write_prompt_tiene_ejemplos_anti_competencia() -> None:
     assert "EFE" in write_md
     # Política explícita.
     assert "competidor" in write_md.lower()
+
+
+def test_write_prompt_enlaces_externos_opcionales() -> None:
+    """v1.2.0: los enlaces externos NO son obligatorios."""
+    write_md = (
+        Path(__file__).parent.parent.parent / "src" / "pipeline" / "prompts" / "write.md"
+    ).read_text(encoding="utf-8")
+    # Mensaje de relajación visible.
+    low = write_md.lower()
+    assert "opcional" in low or "no obligator" in low
+    # No debe haber mensaje de "mínimo 2" como dura.
+    assert "mínimo 2 enlaces" not in write_md
+    assert "≥2 enlaces" not in write_md
+
+
+def test_write_prompt_bloquea_url_competidor_aunque_anchor_neutral() -> None:
+    """v1.2.0 vertiente 2: write.md debe explicar que URLs a dominio
+    competidor son inválidas aunque el anchor sea neutral.
+    """
+    write_md = (
+        Path(__file__).parent.parent.parent / "src" / "pipeline" / "prompts" / "write.md"
+    ).read_text(encoding="utf-8")
+    # La lista de dominios prohibidos aparece explícitamente.
+    assert "elperiodicodearagon.com" in write_md
+    assert "heraldo.es" in write_md
+    # Y un ejemplo INCORRECTO con anchor neutral.
+    assert "anchor neutral" in write_md.lower()

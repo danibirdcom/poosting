@@ -459,7 +459,13 @@ Cargar desde `db/seeds/entidades_aragon.sql`.
 ## 5. Especificación del pipeline multiagente
 
 Implementado como grafo de LangGraph en `workers/pipeline/graph.py`. Cada
-nodo es una función pura `(state) -> state` que persiste en `run_steps`.
+nodo es una función pura `(state) -> state`. El grafo envuelve cada nodo
+con `_ejecutar_step` (vía `persistence.with_step`) para persistir input
+y output COMPACTOS en `run_steps` — trazabilidad completa para auditoría
+editorial y base para la UI de la bandeja. Los compactadores viven en
+`workers/src/pipeline/step_payloads.py`: persisten metadatos (conteos,
+URLs, IDs, títulos truncados a 500 chars), nunca blobs grandes
+(`cuerpo_md` íntegro, `contenido_md` de fuentes, ejemplos cargados).
 
 ```
    detect ──► research ──► write ──► review ──► enrich ──► publish
@@ -566,30 +572,43 @@ JSON con: titulo, meta_title, meta_descr, slug, cuerpo_md, entidades_referidas
 
 **Política editorial: medios competidores** (también enforced en `review`)
 
-El cuerpo del artículo NO menciona a otros medios digitales por su nombre.
-Cuando se atribuye información a una fuente que es un medio de la
-competencia, se enlaza al artículo SIN nombrar al medio. El lector llega a
-la fuente por el enlace; el cuerpo se centra en el hecho.
+El cuerpo del artículo NO menciona a otros medios digitales por su nombre
+NI inserta enlaces markdown a dominios competidores. La estrategia
+prioriza enlace INTERNO (que añade `enrich`) o a fuentes
+institucionales/agencias. Los enlaces externos son OPCIONALES desde
+v1.2.0; el contenido bien escrito vale más que un enlace forzado.
 
-- Prohibido nominalmente en cuerpo: El Periódico de Aragón, El Español,
-  Heraldo (de Aragón), Aragón Digital, 20minutos, El País, El Mundo, ABC,
-  La Razón, CARTV, etc. La lista vive hoy en
-  `workers/src/pipeline/nodes/review.py` (`LISTA_MEDIOS_COMPETIDORES`).
-- Permitido nominalmente:
-  - **Agencias de noticias:** EFE, Europa Press, Reuters, AP, AFP.
-  - **Fuentes institucionales:** BOE, BOA, Ayuntamiento de Zaragoza, DGA,
-    Gobierno de Aragón/España, ministerios, INE.
-  - **El propio medio destino** (auto-referencia, caso raro).
-- URLs del competidor en el `(href)` del enlace markdown NO cuentan como
-  mención (solo se penaliza el nombre visible al lector). El check Python
-  en `review.py` quita las URLs antes de buscar nombres.
+Dos vertientes (estrictas, ambas bloqueantes):
+
+1) **Sin nombres de competidores en el cuerpo.** Prohibidos nominalmente:
+   El Periódico de Aragón, El Español, Heraldo (de Aragón), Aragón
+   Digital, 20minutos, El País, El Mundo, ABC, La Razón, CARTV, etc.
+   Lista en `workers/src/pipeline/nodes/review.py`
+   (`LISTA_MEDIOS_COMPETIDORES`).
+
+2) **Sin URLs de dominios competidores en enlaces markdown** — ni con
+   anchor neutral. Dominios bloqueados: `elperiodicodearagon.com`,
+   `elespanol.com`, `heraldo.es`, `aragondigital.es`, `20minutos.es`,
+   `elpais.com`, `elmundo.es`, `abc.es`, `larazon.es`, `cartv.es`.
+   Lista en `DOMINIOS_COMPETIDORES` (mismo fichero).
+
+Permitido nominalmente y enlazable:
+- **Agencias de noticias:** EFE, Europa Press, Reuters, AP, AFP.
+- **Fuentes institucionales:** BOE, BOA, Ayuntamiento de Zaragoza, DGA,
+  Gobierno de Aragón/España, ministerios, INE.
+- **El propio medio destino** (auto-referencia, caso raro).
+
+Aunque el cuerpo no enlace a fuentes competidoras, el `contenido_md`
+de TODAS las fuentes (incluidas las del competidor) sí se pasa a `write`
+y `review` como contexto (`fuentes_contenido`), para que el redactor
+disponga de los detalles ricos del tema.
 
 Enforcement:
-- En `write`: el prompt instruye con ejemplos CORRECTO/INCORRECTO y una
-  verificación final previa al JSON.
-- En `review`: check Python (`_detectar_menciones_competidores`) + prompt
-  Haiku reforzado. Si se detecta mención, va a `errores_estilo`
-  (bloqueante para retry).
+- En `write`: el prompt instruye con ejemplos CORRECTO/INCORRECTO de
+  ambas vertientes y una verificación final previa al JSON.
+- En `review`: dos checks Python (`_detectar_menciones_competidores` para
+  nombres, `_detectar_urls_competidores` para dominios) + prompt Haiku
+  reforzado. Cualquiera marca `errores_estilo` (bloqueante para retry).
 
 En Fase 4 esta lista se moverá a una tabla `medios_competencia` por
 `medio_id` (la lista varía por cliente: lo que es competencia de Hoy
@@ -605,14 +624,25 @@ Aragón no lo es necesariamente para un medio nacional).
 - Longitud en rango.
 - Slug válido.
 - Meta title ≤ 60 chars, meta descr 140-160 chars.
-- Mínimo N citas a fuentes inline.
-- Markdown válido.
+- URLs citadas existen en `state.fuentes` (defensa contra invención de URLs).
+- Enlaces markdown a dominios competidores → bloqueante (CLAUDE.md §5.3).
+- Menciones nominales a competidores en el cuerpo → bloqueante (§5.3).
+- Markdown válido (sin H1).
+- El mínimo de citas inline NO es bloqueante desde v1.2.0: si el cuerpo
+  no enlaza a fuentes, el nodo emite una sugerencia, no un error. La
+  estrategia prioriza enlace INTERNO (lo añade `enrich`).
 
 **Checks con LLM (agente verificador, Haiku):**
-- Cada afirmación factual del cuerpo aparece en `hechos_verificados`. Si hay
-  invenciones, marcar y rechazar.
+- Cada afirmación factual del cuerpo aparece en `hechos_verificados` O en
+  el `contenido_md` íntegro de las fuentes pasado al LLM como
+  `fuentes_contenido`. Solo si NO aparece en ninguno se marca como
+  invención (CLAUDE.md §5.3). Los `hechos` son los titulares
+  sintetizados; `fuentes_contenido` tiene los detalles ricos.
 - No hay menciones a personas reales sin contexto verificado.
-- Tono y registro coherentes con la `style_guide`.
+- Tono y registro coherentes con la `style_guide`. Los rangos del
+  style_guide ("frase media 18-25 palabras") son OBJETIVOS estadísticos,
+  no topes estrictos. Una frase aislada de 30 palabras no es error si
+  la media global está en rango.
 
 **Output:** `{aprobado: bool, errores: [...], sugerencias: [...]}`
 

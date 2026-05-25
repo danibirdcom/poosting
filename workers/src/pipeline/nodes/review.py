@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from pathlib import Path
+from urllib.parse import urlparse
 
 import structlog
 from jinja2 import Template
@@ -34,6 +35,7 @@ from pydantic import BaseModel, Field, ValidationError
 from src.llm._json_utils import parse_json_tolerante
 from src.llm.claude import json_output_kwargs
 from src.llm.config import CLAUDE_HAIKU_MODEL
+from src.pipeline.nodes._fuentes import preparar_fuentes_contenido
 from src.pipeline.nodes.deps import PipelineDeps
 from src.pipeline.nodes.write import RANGOS_PALABRAS
 from src.pipeline.state import PipelineState
@@ -41,7 +43,30 @@ from src.pipeline.state import PipelineState
 logger = structlog.get_logger(__name__)
 
 MAX_INTENTOS_WRITE = 2
-MIN_CITAS_INLINE = 2
+# Antes era 2 (bloqueante). Ahora opcional: el enlazado externo no es
+# obligatorio (CLAUDE.md §5.3 — la estrategia prioriza enlace INTERNO via
+# `enrich`). Cuando no hay citas, _checks_citas emite una sugerencia, no
+# un error.
+MIN_CITAS_INLINE_SUGERIDAS = 1
+
+# Dominios de medios competidores. Si el cuerpo contiene un enlace markdown
+# `[anchor](URL)` cuyo host coincide con uno de estos dominios (o un
+# subdominio), es error_estilo: no se enlaza a competidor ni siquiera con
+# anchor neutral. Política CLAUDE.md §5.3 vertiente 2).
+DOMINIOS_COMPETIDORES: frozenset[str] = frozenset(
+    {
+        "elperiodicodearagon.com",
+        "elespanol.com",
+        "heraldo.es",
+        "aragondigital.es",
+        "20minutos.es",
+        "elpais.com",
+        "elmundo.es",
+        "abc.es",
+        "larazon.es",
+        "cartv.es",
+    }
+)
 
 # Stopwords ES para validar slug.
 STOPWORDS_SLUG = {
@@ -169,15 +194,16 @@ async def review_node(state: PipelineState, deps: PipelineDeps) -> PipelineState
     errores.extend(err_citas)
     sugerencias.extend(sug_citas)
 
-    # Política editorial (CLAUDE.md §5.4): el cuerpo no nombra a medios
-    # competidores. Defensa en código por si write se salta la regla del
-    # prompt. Bloqueante para retry: si write nombra a un competidor, lo
-    # devolvemos a write con feedback claro.
+    # Política editorial (CLAUDE.md §5.3): el cuerpo no nombra a medios
+    # competidores NI inserta enlaces markdown a sus dominios, aunque sea
+    # con anchor neutral. Defensa en código por si write se salta el prompt.
     medio_nombre = await _cargar_medio_nombre(state, deps)
-    err_competidores = _detectar_menciones_competidores(cuerpo, medio_nombre)
-    errores.extend(err_competidores)
+    errores.extend(_detectar_menciones_competidores(cuerpo, medio_nombre))
+    errores.extend(_detectar_urls_competidores(cuerpo))
 
-    # LLM check (factual + estilo).
+    # LLM check (factual + estilo). El prompt recibe también
+    # fuentes_contenido para que el LLM no marque como invención detalles
+    # que sí están en el texto íntegro de las fuentes.
     style_guide_md = await _cargar_style_guide(state, deps)
     llm_resultado = await _consultar_llm_revisor(state, deps, style_guide_md)
     errores.extend(llm_resultado.errores_factuales)
@@ -269,12 +295,15 @@ def _checks_markdown(cuerpo: str) -> list[str]:
 
 
 def _checks_citas(cuerpo: str, state: PipelineState) -> tuple[list[str], list[str]]:
-    """≥2 citas inline a URLs únicas, todas presentes en state.fuentes.
+    """Validación blanda de citas inline (política CLAUDE.md §5.3).
 
-    Devuelve ``(errores_bloqueantes, sugerencias)``. URLs técnicas de
-    twitter/x.com NO bloquean el draft (sugerencia, no error) — es un
-    problema cosmético que no justifica disparar requiere_revision_humana
-    cuando el resto del draft está correcto.
+    Devuelve ``(errores_bloqueantes, sugerencias)``:
+    - URLs citadas que no están en ``state.fuentes`` → bloqueante (URL
+      fantasma = invención de fuente).
+    - URLs técnicas de twitter/x.com → sugerencia (cosmético).
+    - Sin citas a fuentes habiendo fuentes disponibles → sugerencia: el
+      enlazado externo es opcional desde v1.2.0 (la prioridad es enlazar
+      internamente, que lo hace ``enrich``).
     """
     errores: list[str] = []
     sugerencias: list[str] = []
@@ -297,9 +326,10 @@ def _checks_citas(cuerpo: str, state: PipelineState) -> tuple[list[str], list[st
         )
 
     citas_validas = urls_cuerpo_norm & urls_fuentes
-    if len(citas_validas) < MIN_CITAS_INLINE:
-        errores.append(
-            f"solo {len(citas_validas)} citas inline a fuentes; se requieren ≥{MIN_CITAS_INLINE}"
+    if len(citas_validas) < MIN_CITAS_INLINE_SUGERIDAS and urls_fuentes:
+        sugerencias.append(
+            f"sin citas inline ({len(citas_validas)} de fuentes); considera enlazar "
+            "1-2 fuentes institucionales o agencias si aplica"
         )
 
     return errores, sugerencias
@@ -343,6 +373,7 @@ async def _consultar_llm_revisor(
     ]
     ctx = {
         "hechos": state.get("hechos_verificados") or [],
+        "fuentes_contenido": preparar_fuentes_contenido(state),
         "entidades_catalogo": entidades_nombres,
         "style_guide_md": style_guide_md,
         "titulo": titulo,
@@ -419,6 +450,45 @@ def _detectar_menciones_competidores(cuerpo: str, medio_nombre: str = "") -> lis
                 f"atribución nominal a medio competidor en el cuerpo: "
                 f"'{competidor}' (política: enlazar sin nombrar al medio)"
             )
+    return errores
+
+
+def _detectar_urls_competidores(cuerpo: str) -> list[str]:
+    """Detecta enlaces markdown ``[anchor](URL)`` cuyo host es un dominio
+    competidor (o subdominio del mismo).
+
+    Política CLAUDE.md §5.3 vertiente 2: no se enlaza a competidor ni con
+    anchor neutral. Complementa ``_detectar_menciones_competidores`` (que
+    cubre el nombre visible) — esta función cubre la URL del enlace.
+
+    Devuelve una entrada por dominio (sin duplicar aunque haya N enlaces
+    al mismo competidor).
+    """
+    if not cuerpo:
+        return []
+    errores: list[str] = []
+    encontrados: set[str] = set()
+    # [anchor](url). El anchor puede tener corchetes anidados solo en
+    # markdown patológico; aceptamos contenido sin ']' por simplicidad.
+    pattern = re.compile(r"\[[^\]]*\]\((https?://[^)\s]+)\)")
+    for match in pattern.finditer(cuerpo):
+        url = match.group(1)
+        host = (urlparse(url).hostname or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if not host:
+            continue
+        for dominio in DOMINIOS_COMPETIDORES:
+            if host == dominio or host.endswith("." + dominio):
+                if dominio in encontrados:
+                    break
+                encontrados.add(dominio)
+                errores.append(
+                    f"enlace markdown a dominio de medio competidor: "
+                    f"'{dominio}' (política: enlazar a institucional/agencia "
+                    "o no enlazar)"
+                )
+                break
     return errores
 
 

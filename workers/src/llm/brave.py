@@ -77,14 +77,20 @@ class BraveSearch:
         self._timeout_s = timeout_s
         self._country = country
         self._search_lang = search_lang
+        # Coherente con ClaudeReal/GeminiReal/PexelsClient/VoyageEmbeddings:
+        # el smoke script y el CLI leen este contador para reportar uso.
+        # Se incrementa una vez por llamada exitosa (no por reintento).
+        self.calls_total: int = 0
 
     async def buscar(self, query: str, max_results: int = 10) -> list[dict[str, Any]]:
         if not self._api_key:
             raise RuntimeError(
-                "BRAVE_SEARCH_API_KEY no configurada. Setea la env var o "
-                "inyecta un mock en tests."
+                "BRAVE_SEARCH_API_KEY no configurada. Setea la env var o inyecta un mock en tests."
             )
-        return await self._buscar_with_retry(query, max_results)
+        resultados = await self._buscar_with_retry(query, max_results)
+        # Solo cuenta en éxito (mismo criterio que Voyage).
+        self.calls_total += 1
+        return resultados
 
     @retry(
         stop=stop_after_attempt(3),
@@ -92,9 +98,7 @@ class BraveSearch:
         retry=retry_if_exception(_es_retryable),
         reraise=True,
     )
-    async def _buscar_with_retry(
-        self, query: str, max_results: int
-    ) -> list[dict[str, Any]]:
+    async def _buscar_with_retry(self, query: str, max_results: int) -> list[dict[str, Any]]:
         headers = {
             "X-Subscription-Token": self._api_key,
             "Accept": "application/json",
