@@ -26,7 +26,6 @@ from __future__ import annotations
 import re
 import unicodedata
 from pathlib import Path
-from urllib.parse import urlparse
 
 import structlog
 from jinja2 import Template
@@ -46,9 +45,69 @@ MIN_CITAS_INLINE = 2
 
 # Stopwords ES para validar slug.
 STOPWORDS_SLUG = {
-    "de", "la", "el", "los", "las", "y", "o", "con", "en", "para", "por",
-    "un", "una", "del", "al", "que", "se", "su", "sus",
+    "de",
+    "la",
+    "el",
+    "los",
+    "las",
+    "y",
+    "o",
+    "con",
+    "en",
+    "para",
+    "por",
+    "un",
+    "una",
+    "del",
+    "al",
+    "que",
+    "se",
+    "su",
+    "sus",
 }
+
+# Medios competidores que NO deben citarse nominalmente en el cuerpo.
+# Lista hard-coded por ahora; en Fase 4 movemos a tabla `medios_competencia`
+# configurable por medio (la lista varía por cliente). Ver CLAUDE.md §5.4.
+# Las claves están en formato normalizado (lowercase + sin acentos).
+LISTA_MEDIOS_COMPETIDORES: frozenset[str] = frozenset(
+    {
+        "el periodico de aragon",
+        "el espanol",
+        "heraldo de aragon",
+        "heraldo",
+        "aragon digital",
+        "20minutos",
+        "20 minutos",
+        "el pais",
+        "el mundo",
+        "abc",
+        "la razon",
+        "cartv",  # TV pública aragonesa, parcialmente competencia
+    }
+)
+
+# Nombres que SÍ se pueden citar nominalmente (agencias + institucionales).
+# El propio medio destino se añade dinámicamente desde state.medio_nombre.
+# Esta lista no se usa para validar (solo se filtra por LISTA_MEDIOS_*); la
+# documentamos aquí para que el lector entienda la política completa.
+EXCEPCIONES_PERMITIDAS: frozenset[str] = frozenset(
+    {
+        "efe",
+        "europa press",
+        "reuters",
+        "ap",
+        "afp",
+        "ayuntamiento de zaragoza",
+        "dga",
+        "gobierno de aragon",
+        "gobierno de espana",
+        "boe",
+        "boa",
+        "ministerio",
+        "ine",
+    }
+)
 
 
 _PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "review.md"
@@ -110,23 +169,18 @@ async def review_node(state: PipelineState, deps: PipelineDeps) -> PipelineState
     errores.extend(err_citas)
     sugerencias.extend(sug_citas)
 
+    # Política editorial (CLAUDE.md §5.4): el cuerpo no nombra a medios
+    # competidores. Defensa en código por si write se salta la regla del
+    # prompt. Bloqueante para retry: si write nombra a un competidor, lo
+    # devolvemos a write con feedback claro.
+    medio_nombre = await _cargar_medio_nombre(state, deps)
+    err_competidores = _detectar_menciones_competidores(cuerpo, medio_nombre)
+    errores.extend(err_competidores)
+
     # LLM check (factual + estilo).
     style_guide_md = await _cargar_style_guide(state, deps)
     llm_resultado = await _consultar_llm_revisor(state, deps, style_guide_md)
-
-    # Post-filter de errores factuales: si el error señala una mención a un
-    # medio que aparece como dominio en state.fuentes, es una atribución
-    # periodística legítima y NO debe bloquear el draft. La movemos a
-    # sugerencias por si el editor quiere mejorar la redacción, pero no
-    # cuenta como error. Defensa de código por si Haiku ignora el prompt.
-    dominios_fuentes = _extraer_dominios_fuentes(state)
-    err_factuales_filtrados: list[str] = []
-    for err in llm_resultado.errores_factuales:
-        if _es_atribucion_a_medio_fuente(err, dominios_fuentes):
-            sugerencias.append(f"(atribución a medio fuente, no bloqueante) {err}")
-        else:
-            err_factuales_filtrados.append(err)
-    errores.extend(err_factuales_filtrados)
+    errores.extend(llm_resultado.errores_factuales)
     errores.extend(llm_resultado.errores_estilo)
     sugerencias.extend(llm_resultado.sugerencias)
 
@@ -188,9 +242,7 @@ def _checks_estructura(
             palabras_slug = slug.split("-")
             stopwords_encontradas = [w for w in palabras_slug if w in STOPWORDS_SLUG]
             if stopwords_encontradas:
-                out.append(
-                    f"slug contiene stopwords: {sorted(set(stopwords_encontradas))}"
-                )
+                out.append(f"slug contiene stopwords: {sorted(set(stopwords_encontradas))}")
     else:
         out.append("slug vacío")
 
@@ -216,9 +268,7 @@ def _checks_markdown(cuerpo: str) -> list[str]:
     return out
 
 
-def _checks_citas(
-    cuerpo: str, state: PipelineState
-) -> tuple[list[str], list[str]]:
+def _checks_citas(cuerpo: str, state: PipelineState) -> tuple[list[str], list[str]]:
     """≥2 citas inline a URLs únicas, todas presentes en state.fuentes.
 
     Devuelve ``(errores_bloqueantes, sugerencias)``. URLs técnicas de
@@ -235,13 +285,9 @@ def _checks_citas(
     urls_cuerpo_norm = {u.rstrip("/") for u in urls_cuerpo}
 
     fantasma = urls_cuerpo_norm - urls_fuentes
-    fantasma_no_twitter = {
-        u for u in fantasma if "twitter.com" not in u and "x.com" not in u
-    }
+    fantasma_no_twitter = {u for u in fantasma if "twitter.com" not in u and "x.com" not in u}
     if fantasma_no_twitter:
-        errores.append(
-            f"urls citadas no están en fuentes: {sorted(fantasma_no_twitter)[:3]}"
-        )
+        errores.append(f"urls citadas no están en fuentes: {sorted(fantasma_no_twitter)[:3]}")
 
     urls_x = {u for u in urls_cuerpo if "twitter.com" in u or "x.com" in u}
     if urls_x:
@@ -250,11 +296,10 @@ def _checks_citas(
             "'una publicación en X' (no la URL)"
         )
 
-    citas_validas = (urls_cuerpo_norm & urls_fuentes)
+    citas_validas = urls_cuerpo_norm & urls_fuentes
     if len(citas_validas) < MIN_CITAS_INLINE:
         errores.append(
-            f"solo {len(citas_validas)} citas inline a fuentes; "
-            f"se requieren ≥{MIN_CITAS_INLINE}"
+            f"solo {len(citas_validas)} citas inline a fuentes; se requieren ≥{MIN_CITAS_INLINE}"
         )
 
     return errores, sugerencias
@@ -294,9 +339,7 @@ async def _consultar_llm_revisor(
         return ReviewLLMOutput()
 
     entidades_nombres = [
-        str(e.get("nombre"))
-        for e in (state.get("entidades") or [])
-        if e.get("nombre")
+        str(e.get("nombre")) for e in (state.get("entidades") or []) if e.get("nombre")
     ]
     ctx = {
         "hechos": state.get("hechos_verificados") or [],
@@ -327,61 +370,66 @@ async def _consultar_llm_revisor(
 
 
 # ---------------------------------------------------------------------------
-# Detección de atribuciones a medios fuente (post-filter de errores LLM)
+# Política editorial: detección de menciones a medios competidores
 # ---------------------------------------------------------------------------
-def _normalizar(s: str) -> str:
-    """lowercase + sin acentos + solo alfanumérico.
-
-    "El Periódico de Aragón" → "elperiodicodearagon"
-    Permite matching robusto entre nombres humanos y slugs de dominio.
-    """
+def _quitar_acentos(s: str) -> str:
     descompuesto = unicodedata.normalize("NFD", s)
-    sin_acentos = "".join(c for c in descompuesto if unicodedata.category(c) != "Mn")
-    return "".join(c.lower() for c in sin_acentos if c.isalnum())
+    return "".join(c for c in descompuesto if unicodedata.category(c) != "Mn")
 
 
-def _extraer_dominios_fuentes(state: PipelineState) -> set[str]:
-    """Devuelve set de "nicknames" de medios fuente, normalizados.
-
-    Para cada fuente con url o dominio, extrae la parte distintiva del dominio
-    (segmento antes del TLD, sin "www") y la normaliza. P. ej.:
-        https://www.elperiodicodearagon.com/x  → "elperiodicodearagon"
-        https://heraldo.es/y                   → "heraldo"
-    Nicknames de longitud < 4 se descartan (evita falsos positivos con
-    dominios cortos tipo "ok.es").
+def _normalizar_texto(s: str) -> str:
+    """lowercase + sin acentos. Preserva espacios y guiones para que las
+    comparaciones por word-boundary funcionen (a diferencia del normalizador
+    legacy, que colapsaba todo a alfanumérico).
     """
-    out: set[str] = set()
-    for f in state.get("fuentes") or []:
-        host = (f.get("dominio") or "").lower()
-        if not host:
-            url = f.get("url") or ""
-            try:
-                host = (urlparse(url).hostname or "").lower()
-            except ValueError:
-                continue
-        if not host:
+    return _quitar_acentos(s).lower()
+
+
+def _detectar_menciones_competidores(cuerpo: str, medio_nombre: str = "") -> list[str]:
+    """Devuelve errores por cada medio competidor nombrado en el cuerpo.
+
+    Política (CLAUDE.md §5.4): el cuerpo no cita a medios competidores por
+    su nombre, ni en el anchor de un enlace ni en el texto narrativo. Las
+    URLs (``https://...``) se ignoran: el dominio del competidor en el path
+    NO cuenta como mención. El nombre del medio destino (``medio_nombre``)
+    se excluye dinámicamente — auto-referencia permitida.
+
+    Devuelve lista de errores en español, listos para añadirse a
+    ``state.review_errores`` (bloqueantes para retry).
+    """
+    if not cuerpo:
+        return []
+
+    # Quitamos URLs antes de buscar: el dominio en el path no es mención.
+    cuerpo_sin_urls = re.sub(r"https?://\S+", " ", cuerpo)
+    texto_norm = _normalizar_texto(cuerpo_sin_urls)
+
+    auto_ref = _normalizar_texto((medio_nombre or "").strip())
+    errores: list[str] = []
+    encontrados: set[str] = set()
+    for competidor in LISTA_MEDIOS_COMPETIDORES:
+        if auto_ref and competidor == auto_ref:
             continue
-        if host.startswith("www."):
-            host = host[4:]
-        # Tomar el primer segmento (antes del primer "."): "heraldo.es" → "heraldo".
-        nickname = host.split(".")[0]
-        if len(nickname) >= 4:
-            out.add(_normalizar(nickname))
-    return out
+        # Word boundaries para evitar matches parciales ("abc" en "abcdef",
+        # "ap" en "apenas", etc.). \b funciona con [a-z0-9_].
+        patron = r"\b" + re.escape(competidor) + r"\b"
+        if re.search(patron, texto_norm) and competidor not in encontrados:
+            encontrados.add(competidor)
+            errores.append(
+                f"atribución nominal a medio competidor en el cuerpo: "
+                f"'{competidor}' (política: enlazar sin nombrar al medio)"
+            )
+    return errores
 
 
-def _es_atribucion_a_medio_fuente(error: str, dominios: set[str]) -> bool:
-    """True si el error señala una entidad cuyo nombre coincide con un medio
-    en ``dominios`` (set de nicknames ya normalizados).
-
-    Estrategia: normaliza el error y comprueba si algún nickname aparece como
-    substring. P. ej. error="mención a 'El Periódico de Aragón' no catalogada"
-    normalizado contiene "elperiodicodearagon" — match con nickname.
-    """
-    if not dominios:
-        return False
-    error_norm = _normalizar(error)
-    return any(nick in error_norm for nick in dominios)
+async def _cargar_medio_nombre(state: PipelineState, deps: PipelineDeps) -> str:
+    medio_id = state.get("medio_id")
+    if medio_id is None:
+        return ""
+    async with deps.pool.acquire() as conn:
+        await conn.execute("SELECT set_config('app.medio_actual', $1, false)", str(medio_id))
+        row = await conn.fetchval("SELECT nombre FROM medios WHERE id = $1", medio_id)
+    return row or ""
 
 
 def _parse_legacy(raw: str) -> ReviewLLMOutput:
@@ -389,9 +437,9 @@ def _parse_legacy(raw: str) -> ReviewLLMOutput:
     estilo: list[str] = []
     for line in raw.splitlines():
         if line.startswith("FACTUAL:"):
-            factual.append(line[len("FACTUAL:"):].strip())
+            factual.append(line[len("FACTUAL:") :].strip())
         elif line.startswith("ESTILO:"):
-            estilo.append(line[len("ESTILO:"):].strip())
+            estilo.append(line[len("ESTILO:") :].strip())
     return ReviewLLMOutput(errores_factuales=factual, errores_estilo=estilo)
 
 

@@ -564,6 +564,37 @@ JSON con: titulo, meta_title, meta_descr, slug, cuerpo_md, entidades_referidas
 - Meta title diferente del H1 (Discover lo agradece).
 - Slug optimizado, sin stopwords, máximo 60 caracteres.
 
+**Política editorial: medios competidores** (también enforced en `review`)
+
+El cuerpo del artículo NO menciona a otros medios digitales por su nombre.
+Cuando se atribuye información a una fuente que es un medio de la
+competencia, se enlaza al artículo SIN nombrar al medio. El lector llega a
+la fuente por el enlace; el cuerpo se centra en el hecho.
+
+- Prohibido nominalmente en cuerpo: El Periódico de Aragón, El Español,
+  Heraldo (de Aragón), Aragón Digital, 20minutos, El País, El Mundo, ABC,
+  La Razón, CARTV, etc. La lista vive hoy en
+  `workers/src/pipeline/nodes/review.py` (`LISTA_MEDIOS_COMPETIDORES`).
+- Permitido nominalmente:
+  - **Agencias de noticias:** EFE, Europa Press, Reuters, AP, AFP.
+  - **Fuentes institucionales:** BOE, BOA, Ayuntamiento de Zaragoza, DGA,
+    Gobierno de Aragón/España, ministerios, INE.
+  - **El propio medio destino** (auto-referencia, caso raro).
+- URLs del competidor en el `(href)` del enlace markdown NO cuentan como
+  mención (solo se penaliza el nombre visible al lector). El check Python
+  en `review.py` quita las URLs antes de buscar nombres.
+
+Enforcement:
+- En `write`: el prompt instruye con ejemplos CORRECTO/INCORRECTO y una
+  verificación final previa al JSON.
+- En `review`: check Python (`_detectar_menciones_competidores`) + prompt
+  Haiku reforzado. Si se detecta mención, va a `errores_estilo`
+  (bloqueante para retry).
+
+En Fase 4 esta lista se moverá a una tabla `medios_competencia` por
+`medio_id` (la lista varía por cliente: lo que es competencia de Hoy
+Aragón no lo es necesariamente para un medio nacional).
+
 ### 5.4 Nodo `review`
 
 **Input:** `{draft generado, hechos_verificados, fuentes}`
