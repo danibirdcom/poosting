@@ -1190,6 +1190,16 @@ no filtraría y habría leak entre tenants.
 En PR1 `medioId` viene de `MEDIO_ID_HARDCODED` (env var). En PR2 viene
 de la sesión NextAuth (rol del usuario + tenant activo).
 
+### SSL contra RDS
+
+`lib/db.ts` añade SSL (`rejectUnauthorized: false`) automáticamente para
+cualquier host del DSN que NO sea `localhost` / `127.0.0.1` / `::1`.
+**NO añadas `?sslmode=require` ni `?uselibpqcompat=true` al DSN** — pg
+≥8.13 trata `sslmode=require` como verify-full (requiere CA validada) y
+rompe contra RDS porque la CA de Amazon no está en el truststore por
+defecto. Detectar por host es robusto y libera a la documentación del DSN
+de flags SSL.
+
 ### Tabla `auditoria_humano`
 
 Creada en migración 006. La UI escribe ahí cada vez que un editor humano
