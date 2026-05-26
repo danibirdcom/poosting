@@ -36,10 +36,17 @@ export class NoOpPublisher implements CmsPublisher {
   static readonly UNAVAILABLE =
     "CmsPublisher no implementado: la publicación al CMS llega en PR3 con el adapter de Opennemas.";
 
-  async publishDraft(): Promise<PublishResult> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  async publishDraft(_draft: PublishableDraft): Promise<PublishResult> {
     return { ok: false, error: NoOpPublisher.UNAVAILABLE };
   }
-  async updatePost(): Promise<PublishResult> {
+
+  async updatePost(
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _externalId: string,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _draft: PublishableDraft
+  ): Promise<PublishResult> {
     return { ok: false, error: NoOpPublisher.UNAVAILABLE };
   }
 }
