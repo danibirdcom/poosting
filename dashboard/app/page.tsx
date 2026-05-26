@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 
-// La home redirige a la bandeja (única pantalla útil en PR1).
+// El middleware decide a dónde mandar /: a /bandeja si hay sesión, a
+// /login si no. Si por algún motivo llegas aquí, vamos a /login.
 export default function HomePage() {
-  redirect("/bandeja");
+  redirect("/login");
 }
