@@ -61,7 +61,13 @@ function buildPool(): Pool {
       "DATABASE_URL_WEB no está definida. Copia dashboard/.env.local.example a dashboard/.env.local y rellénala."
     );
   }
-  return new Pool(buildPoolConfig(connectionString));
+  const pool = new Pool(buildPoolConfig(connectionString));
+  // Sin un listener `error`, un peer reset de RDS tumba el proceso.
+  pool.on("error", (err) => {
+    // structlog-style minimal en node-stdout; lo importa Next dev y prod.
+    console.error("[pgPool] cliente inactivo lanzó error", err);
+  });
+  return pool;
 }
 
 // Lazy: no construyas el pool en module-load (rompería tests sin env).
@@ -72,6 +78,16 @@ function getPool(): Pool {
     globalThis.pgPool = pool;
   }
   return pool;
+}
+
+/**
+ * Acceso directo al pool, SIN setear `app.medio_actual`. Solo para queries
+ * a tablas que NO tienen RLS (usuarios, usuarios_medios), típicamente
+ * durante el login. Cualquier otra query DEBE pasar por `queryAsMedio()`
+ * o `queryAsUser()` para que RLS filtre.
+ */
+export function getRawPool(): Pool {
+  return getPool();
 }
 
 /**
@@ -94,6 +110,26 @@ export async function queryAsMedio<T>(
   } finally {
     client.release();
   }
+}
+
+/**
+ * Variante de `queryAsMedio` que toma el medio activo de la sesión
+ * NextAuth. Lanza si no hay sesión válida.
+ *
+ * Implementación: import dinámico de `@/auth` para evitar ciclo de
+ * carga (auth → db → auth) y para que los tests que mockean `@/auth`
+ * funcionen sin tocar el módulo NextAuth real.
+ */
+export async function queryAsUser<T>(
+  text: string,
+  params: unknown[] = []
+): Promise<T[]> {
+  const { auth } = await import("@/auth");
+  const session = await auth();
+  if (!session?.user?.medioId) {
+    throw new Error("No autorizado: sesión inválida o sin medio activo");
+  }
+  return queryAsMedio<T>(session.user.medioId, text, params);
 }
 
 /**

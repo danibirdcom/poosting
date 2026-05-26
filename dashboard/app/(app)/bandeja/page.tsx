@@ -13,17 +13,13 @@ import {
 } from "@/lib/drafts";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { requireMedioId } from "@/lib/auth-utils";
 
 /*
  * Bandeja de drafts (Server Component).
  *
- * Lee filtros de searchParams, fetchea desde Postgres con RLS via
- * `queryAsMedio`, y renderiza tabla + paginación. Cualquier cambio en
- * filtros desde el cliente reescribe la URL → este Server Component
- * se re-renderiza con los datos nuevos.
- *
- * `medioId` viene de `MEDIO_ID_HARDCODED` (PR1). En PR2 viene de la
- * sesión NextAuth.
+ * Lee filtros de searchParams, fetchea desde Postgres con RLS, y renderiza
+ * tabla + paginación. El `medioId` viene de la sesión NextAuth (PR2).
  */
 
 export const dynamic = "force-dynamic"; // depende de searchParams + BD
@@ -57,16 +53,6 @@ function parseFiltros(sp: SearchParams) {
   };
 }
 
-function getMedioId(): string {
-  const id = process.env.MEDIO_ID_HARDCODED;
-  if (!id) {
-    throw new Error(
-      "MEDIO_ID_HARDCODED no definido. PR1 lee el medio activo desde esta env var; copia .env.local.example a .env.local."
-    );
-  }
-  return id;
-}
-
 export default async function BandejaPage({
   searchParams,
 }: {
@@ -74,7 +60,7 @@ export default async function BandejaPage({
 }) {
   const sp = await searchParams;
   const filtros = parseFiltros(sp);
-  const medioId = getMedioId();
+  const medioId = await requireMedioId();
 
   const [rows, total] = await Promise.all([
     listDrafts(medioId, filtros),
