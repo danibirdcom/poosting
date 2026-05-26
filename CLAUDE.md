@@ -1145,6 +1145,77 @@ Cosas que NO queremos en este código y por qué.
 
 ---
 
+## 16. UI dashboard (Fase 4)
+
+Vive en `dashboard/`. Next.js 15 (App Router) + React 19 + Tailwind +
+shadcn/ui (tema new-york, color base zinc).
+
+### Roles de BD
+
+- **`redactia_app`** (existente, migración 002): rol del backend Python
+  (`workers/`, `api/`). CRUD completo, RLS filtra.
+- **`redactia_web`** (nuevo, migración 007): rol de la UI Next.js. SELECT
+  en lectura, UPDATE acotado en `drafts`, INSERT en `auditoria_humano`.
+  NO puede CREATE/DROP/DELETE.
+
+Ambos son roles GRUPO sin login. Cada entorno crea su usuario login y le
+concede pertenencia:
+
+```sql
+CREATE ROLE redactia_web_dev LOGIN PASSWORD '<password>';
+GRANT redactia_web TO redactia_web_dev;
+```
+
+Esto mantiene las migraciones portables: no contienen passwords ni
+nombres de base de datos.
+
+### Setup local
+
+1. Aplicar migraciones 006 + 007 (como superuser):
+   ```bash
+   psql "$DATABASE_URL_ADMIN" -f db/migrations/006_auditoria_humano.sql
+   psql "$DATABASE_URL_ADMIN" -f db/migrations/007_redactia_web_role.sql
+   ```
+2. Crear usuario login con membership en `redactia_web` (ver bloque SQL arriba).
+3. `cp dashboard/.env.local.example dashboard/.env.local` y rellenar.
+4. `cd dashboard && npm install && npm run dev` → http://localhost:3000.
+
+### Multi-tenancy en la UI
+
+Toda query a BD pasa por `queryAsMedio(medioId, sql, params)` en
+`dashboard/lib/db.ts`. El helper setea `app.medio_actual` antes del
+statement, activando RLS. **Nunca usar `pool.query()` directo** — RLS
+no filtraría y habría leak entre tenants.
+
+En PR1 `medioId` viene de `MEDIO_ID_HARDCODED` (env var). En PR2 viene
+de la sesión NextAuth (rol del usuario + tenant activo).
+
+### SSL contra RDS
+
+`lib/db.ts` añade SSL (`rejectUnauthorized: false`) automáticamente para
+cualquier host del DSN que NO sea `localhost` / `127.0.0.1` / `::1`.
+**NO añadas `?sslmode=require` ni `?uselibpqcompat=true` al DSN** — pg
+≥8.13 trata `sslmode=require` como verify-full (requiere CA validada) y
+rompe contra RDS porque la CA de Amazon no está en el truststore por
+defecto. Detectar por host es robusto y libera a la documentación del DSN
+de flags SSL.
+
+### Tabla `auditoria_humano`
+
+Creada en migración 006. La UI escribe ahí cada vez que un editor humano
+aprueba/rechaza/edita/archiva un draft. Workers nunca escribe. Permite
+reconstruir el historial editorial para auditoría GDPR.
+
+### Plan de PRs (Fase 4)
+
+- **PR1** (en progreso): scaffolding + bandeja read-only.
+- **PR2:** NextAuth (email+password) + editor de draft + aprobar /
+  rechazar / archivar + `auditoria_humano` funcional.
+- **PR3:** deploy AWS Amplify + dominio `redactia.birdcom.es`.
+- **PR4:** trazabilidad (`run_steps` viewer) + lanzar run manual.
+
+---
+
 **Nota final para Claude Code:** este archivo es la fuente de verdad de las
 decisiones de arquitectura. Si una solicitud del usuario entra en conflicto
 con algo aquí (política de imagen, multi-tenancy, stack), pregunta antes de
