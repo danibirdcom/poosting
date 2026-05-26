@@ -1208,11 +1208,59 @@ reconstruir el historial editorial para auditoría GDPR.
 
 ### Plan de PRs (Fase 4)
 
-- **PR1** (en progreso): scaffolding + bandeja read-only.
-- **PR2:** NextAuth (email+password) + editor de draft + aprobar /
-  rechazar / archivar + `auditoria_humano` funcional.
-- **PR3:** deploy AWS Amplify + dominio `redactia.birdcom.es`.
+- **PR1** (mergeado): scaffolding + bandeja read-only.
+- **PR2** (en revisión): NextAuth (email+password) + editor de draft +
+  aprobar / rechazar / archivar + `auditoria_humano` funcional.
+- **PR3:** deploy AWS Amplify + dominio `redactia.birdcom.es` +
+  `OpennemasPublisher` (Hoy Aragón).
 - **PR4:** trazabilidad (`run_steps` viewer) + lanzar run manual.
+
+### Autenticación y sesiones (PR2)
+
+- **NextAuth v5** con Credentials provider. Sin registro público.
+- Password storage: **argon2id** sobre la columna existente
+  `usuarios.password_hash` (no hay tabla separada). Parámetros preset
+  OWASP 2024: `memoryCost=19456, timeCost=2, parallelism=1`.
+- Sesión: JWT en cookie httpOnly, `maxAge=12h`. `AUTH_SECRET` por entorno.
+- El JWT lleva `medioId` + `medioRol` + `rolGlobal`. El `medioId` se
+  toma del primer `usuarios_medios` del usuario ordenado por uuid.
+  Multi-medio (selector de tenant activo) queda para PR futuro.
+- `usuarios` y `usuarios_medios` **no tienen RLS** (son globales / fuente
+  de membresía). El `authorize()` las lee directamente con `getRawPool()`
+  sin setear `app.medio_actual`.
+- Migración 008 añade `GRANT SELECT ON usuarios, usuarios_medios` +
+  `GRANT UPDATE (password_hash) ON usuarios` para `redactia_web`.
+- `middleware.ts` (edge runtime) protege `/bandeja`, `/runs`, `/admin`.
+  Usa `auth.config.ts` (sin pg/argon2) para mantener el bundle edge ligero.
+- Crear usuario: `echo 'pass' | npm run hash-password` y luego SQL
+  manual (`INSERT INTO usuarios` + `INSERT INTO usuarios_medios`). Ver
+  `dashboard/README.md`.
+
+### Auditoría humana
+
+Tabla `auditoria_humano` (migración 006). La UI escribe vía
+`registerAuditEvent` en `lib/auditoria.ts` cada vez que un editor:
+
+- guarda cambios (`accion='editado'` + `diff_resumen`),
+- aprueba un draft (`accion='aprobado'`),
+- rechaza con motivo obligatorio (mín. 10 chars; `accion='rechazado'` +
+  `notas`),
+- archiva (`accion='archivado'`).
+
+El `diff_resumen` se calcula con `diffDraftSnapshots` y trunca
+`cuerpo_md` a 200 chars antes y después (la fuente de verdad del
+cuerpo íntegro es la tabla `drafts`). Workers nunca escribe en
+`auditoria_humano`; solo `redactia_web` tiene `INSERT` (migración 007).
+
+### Interfaz `CmsPublisher`
+
+`dashboard/lib/cms/publisher.ts` define la interfaz `CmsPublisher` con
+métodos `publishDraft` y `updatePost`. En PR2 la única implementación
+es `NoOpPublisher`, que devuelve error con mensaje claro de que la
+publicación al CMS llega en PR3. La acción "Aprobar" en PR2 **solo
+cambia `drafts.estado = 'aprobado'` en BD; no invoca al publisher**.
+La publicación real al CMS de Hoy Aragón (Opennemas) entra en PR3
+cuando se confirme la API REST con Openhost.
 
 ---
 
